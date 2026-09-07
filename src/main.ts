@@ -29,9 +29,14 @@ const CATCH_RADIUS = 1.1
 const FIELD_X_LIMIT = 19
 const FIELD_Z_LIMIT = 9.5
 
+// Área de 6 metros: solo el portero puede pisarla. Un poco más ancha que la
+// línea dibujada (6m) para que el jugador se quede claramente fuera de ella,
+// no pegado al trazo.
+const GOAL_AREA_RADIUS = 6.5
+
 const DEFENDER_SPEED = 4.2
 const DEFENDER_MARK_DISTANCE = 1.4 // se colocan entre su atacante y la portería
-const DEFENDER_MIN_FROM_GOAL = 6.5 // no invaden el área de 6m
+const DEFENDER_MIN_FROM_GOAL = GOAL_AREA_RADIUS
 const DEFENDER_MAX_FROM_GOAL = 18
 const DEFENDER_INTERCEPT_RADIUS = 0.85
 
@@ -160,6 +165,22 @@ function createTeamDisc(color: number): THREE.Mesh {
 function layoutZ(count: number, spread: number): number[] {
   if (count <= 1) return [0]
   return Array.from({ length: count }, (_, i) => THREE.MathUtils.lerp(-spread, spread, i / (count - 1)))
+}
+
+// Empuja `pos` fuera de cualquiera de las dos áreas de 6m (solo el portero
+// puede pisarlas): si cae dentro del radio, lo desplaza radialmente hasta
+// el borde.
+function keepOutOfGoalArea(pos: THREE.Vector3) {
+  for (const goalX of [GOAL_LINE_X, -GOAL_LINE_X]) {
+    const dx = pos.x - goalX
+    const dz = pos.z
+    const dist = Math.hypot(dx, dz)
+    if (dist < GOAL_AREA_RADIUS && dist > 0.0001) {
+      const scale = GOAL_AREA_RADIUS / dist
+      pos.x = goalX + dx * scale
+      pos.z = dz * scale
+    }
+  }
 }
 
 const passIconsEl = document.getElementById('pass-icons')!
@@ -345,6 +366,7 @@ renderer.domElement.addEventListener('contextmenu', (event) => {
     if (raycaster.ray.intersectPlane(groundPlane, point)) {
       point.x = THREE.MathUtils.clamp(point.x, -FIELD_X_LIMIT, FIELD_X_LIMIT)
       point.z = THREE.MathUtils.clamp(point.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+      keepOutOfGoalArea(point)
       teammates[tacticalSelected].target = point.clone()
       const marker = teammates[tacticalSelected].marker
       marker.position.set(point.x, 0.02, point.z)
@@ -432,6 +454,26 @@ function resetBall() {
   hasDribbled = false
 }
 
+// Saque tras balón fuera: siempre se lo queda el ataque, el compañero más
+// cercano al punto donde salió (sin reposicionar a nadie más).
+function giveBallToNearestAttacker(atPoint: THREE.Vector3) {
+  let nearestIdx = 0
+  let nearestDist = Infinity
+  teammates.forEach((t, idx) => {
+    const d = t.group.position.distanceTo(atPoint)
+    if (d < nearestDist) {
+      nearestDist = d
+      nearestIdx = idx
+    }
+  })
+  possession = nearestIdx
+  passTargetIdx = null
+  ballVelocity.set(0, 0, 0)
+  carryDistance = 0
+  hasDribbled = false
+  if (nearestIdx !== activeIndex) setActive(nearestIdx)
+}
+
 function updateActivePlayer(dt: number) {
   const active = teammates[activeIndex]
 
@@ -460,6 +502,7 @@ function updateActivePlayer(dt: number) {
     active.group.position.addScaledVector(move, PLAYER_SPEED * dt)
     active.group.position.x = THREE.MathUtils.clamp(active.group.position.x, -FIELD_X_LIMIT, FIELD_X_LIMIT)
     active.group.position.z = THREE.MathUtils.clamp(active.group.position.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+    keepOutOfGoalArea(active.group.position)
     active.facing = move.clone()
     active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
 
@@ -504,6 +547,7 @@ function updateTeammateAI(t: Teammate, dt: number) {
   }
   const dir = new THREE.Vector3(dx / dist, 0, dz / dist)
   pos.addScaledVector(dir, Math.min(TEAMMATE_SPEED * dt, dist))
+  keepOutOfGoalArea(pos)
   t.facing = dir
   t.group.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI / 2
 }
@@ -630,8 +674,9 @@ function updateBallFree(dt: number) {
 
   const outOfBounds = ball.position.x < -20.5 || ball.position.x > 20.5 || Math.abs(ball.position.z) > 10.5
   if (outOfBounds) {
-    messageEl.textContent = 'Balón fuera.'
-    ballVelocity.set(0, 0, 0)
+    messageEl.textContent = 'Balón fuera. Saque para el ataque.'
+    playWhistle()
+    giveBallToNearestAttacker(ball.position)
   }
 }
 
