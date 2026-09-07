@@ -24,6 +24,12 @@ const DEFENDER_MIN_FROM_GOAL = 6.5 // no invaden el área de 6m
 const DEFENDER_MAX_FROM_GOAL = 18
 const DEFENDER_INTERCEPT_RADIUS = 0.85
 
+const ATTACKER_COLOR = 0x1f5fff
+const DEFENDER_COLOR = 0xe02020
+const KEEPER_COLOR = 0xffcc00
+const MIN_ROSTER = 1
+const MAX_ROSTER = 6
+
 // --- Escena base ---
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x87ceeb)
@@ -81,6 +87,13 @@ interface Teammate {
   marker: THREE.Mesh
   facing: THREE.Vector3
   target: THREE.Vector3 | null
+  startPos: THREE.Vector3
+}
+
+interface Defender {
+  group: THREE.Group
+  marks: number // índice del compañero al que marca
+  startPos: THREE.Vector3
 }
 
 function createRing(color: number): THREE.Mesh {
@@ -106,34 +119,109 @@ function createMarker(): THREE.Mesh {
   return marker
 }
 
-const startPositions = [
-  new THREE.Vector3(-10, 0, 0),
-  new THREE.Vector3(-14, 0, -6),
-  new THREE.Vector3(-14, 0, 6),
-]
-const tints = [0x2b6cff, 0x22c1ff, 0x22ffb0]
+// Disco de color permanente bajo los pies: distingue de un vistazo equipo
+// atacante (azul) de equipo defensor (rojo), independientemente de cómo
+// se vea el modelo/textura del personaje.
+function createTeamDisc(color: number): THREE.Mesh {
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 24),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 }),
+  )
+  disc.rotation.x = -Math.PI / 2
+  disc.position.y = 0.015
+  return disc
+}
+
+// Reparte `count` posiciones a lo ancho del campo (eje Z), centradas en 0.
+function layoutZ(count: number, spread: number): number[] {
+  if (count <= 1) return [0]
+  return Array.from({ length: count }, (_, i) => THREE.MathUtils.lerp(-spread, spread, i / (count - 1)))
+}
 
 const passIconsEl = document.getElementById('pass-icons')!
 const passIcons: HTMLDivElement[] = []
 const teammates: Teammate[] = []
-for (let i = 0; i < 3; i++) {
-  const group = await loadCharacter('/models/player.glb', tints[i])
-  group.position.copy(startPositions[i])
-  const ring = createRing(0x22ff88)
-  group.add(ring)
-  scene.add(group)
-  teammates.push({ group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null })
-
-  const icon = document.createElement('div')
-  icon.className = 'pass-icon'
-  icon.textContent = String(i + 1)
-  icon.addEventListener('click', () => choosePlayer(i))
-  passIconsEl.appendChild(icon)
-  passIcons.push(icon)
-}
+const defenders: Defender[] = []
+const hitboxes: THREE.Mesh[] = []
 
 let activeIndex = 0
 let tacticalSelected: number | null = null
+
+async function buildTeams(attackerCount: number, defenderCount: number) {
+  // Se carga todo en arrays temporales primero (los del equipo en juego no se
+  // tocan mientras tanto, así el frame en curso sigue viendo el equipo anterior
+  // completo) y solo al final se sustituye todo de golpe, sin ningún `await`
+  // de por medio, para no dejar el equipo a medias en ningún frame renderizado.
+  const newTeammates: Teammate[] = []
+  const newHitboxes: THREE.Mesh[] = []
+  const newIcons: HTMLDivElement[] = []
+
+  const attackerZ = layoutZ(attackerCount, 8)
+  for (let i = 0; i < attackerCount; i++) {
+    const group = await loadCharacter('/models/player.glb', ATTACKER_COLOR)
+    const startPos = new THREE.Vector3(-10 - (i % 2) * 3, 0, attackerZ[i])
+    group.position.copy(startPos)
+    group.add(createTeamDisc(ATTACKER_COLOR))
+    const ring = createRing(0x22ff88)
+    group.add(ring)
+    newTeammates.push({ group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null, startPos })
+
+    const box = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
+    )
+    box.position.y = 1.1
+    box.userData.idx = i
+    group.add(box)
+    newHitboxes.push(box)
+
+    const icon = document.createElement('div')
+    icon.className = 'pass-icon'
+    icon.textContent = String(i + 1)
+    icon.addEventListener('click', () => choosePlayer(i))
+    newIcons.push(icon)
+  }
+
+  const newDefenders: Defender[] = []
+  const defenderZ = layoutZ(defenderCount, 8)
+  for (let i = 0; i < defenderCount; i++) {
+    const group = await loadCharacter('/models/keeper.glb', DEFENDER_COLOR)
+    const startPos = new THREE.Vector3(12 + (i % 2) * 3, 0, defenderZ[i])
+    group.position.copy(startPos)
+    group.rotation.y = -Math.PI / 2
+    group.add(createTeamDisc(DEFENDER_COLOR))
+    newDefenders.push({ group, marks: i % attackerCount, startPos })
+  }
+
+  // --- swap atómico ---
+  teammates.forEach((t) => {
+    scene.remove(t.group)
+    scene.remove(t.marker)
+  })
+  defenders.forEach((d) => scene.remove(d.group))
+
+  teammates.length = 0
+  teammates.push(...newTeammates)
+  defenders.length = 0
+  defenders.push(...newDefenders)
+  hitboxes.length = 0
+  hitboxes.push(...newHitboxes)
+  passIconsEl.innerHTML = ''
+  passIcons.length = 0
+  newIcons.forEach((icon) => {
+    passIconsEl.appendChild(icon)
+    passIcons.push(icon)
+  })
+
+  newTeammates.forEach((t) => scene.add(t.group))
+  newDefenders.forEach((d) => scene.add(d.group))
+
+  activeIndex = 0
+  tacticalSelected = null
+  possession = 0
+  passTargetIdx = null
+  ballVelocity.set(0, 0, 0)
+}
 
 function setActive(idx: number) {
   if (idx === activeIndex) return
@@ -151,31 +239,13 @@ function choosePlayer(idx: number) {
   else setActive(idx)
 }
 
-const keeper = await loadCharacter('/models/keeper.glb', 0xff3b3b)
+const keeper = await loadCharacter('/models/keeper.glb', KEEPER_COLOR)
 keeper.position.set(GOAL_LINE_X - 0.8, 0, 0)
 keeper.rotation.y = -Math.PI / 2
+keeper.add(createTeamDisc(KEEPER_COLOR))
 scene.add(keeper)
 
-// --- Defensores rivales: marcaje individual, uno por cada atacante ---
-interface Defender {
-  group: THREE.Group
-  marks: number // índice del compañero al que marca
-}
-
-const defenderStarts = [
-  new THREE.Vector3(12, 0, 0),
-  new THREE.Vector3(14, 0, -6),
-  new THREE.Vector3(14, 0, 6),
-]
-
-const defenders: Defender[] = []
-for (let i = 0; i < 3; i++) {
-  const group = await loadCharacter('/models/keeper.glb', 0x7a1414)
-  group.position.copy(defenderStarts[i])
-  group.rotation.y = -Math.PI / 2
-  scene.add(group)
-  defenders.push({ group, marks: i })
-}
+await buildTeams(3, 3)
 
 let score = 0
 
@@ -192,23 +262,14 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault()
     setActive((activeIndex + 1) % teammates.length)
   }
-  if (['1', '2', '3'].includes(e.key)) choosePlayer(Number(e.key) - 1)
+  const n = Number(e.key)
+  if (Number.isInteger(n) && n >= 1 && n <= teammates.length) choosePlayer(n - 1)
 })
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
 
 // --- Selección y órdenes con el ratón ---
 const raycaster = new THREE.Raycaster()
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
-const hitboxes = teammates.map((t, idx) => {
-  const box = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
-    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
-  )
-  box.position.y = 1.1
-  box.userData.idx = idx
-  t.group.add(box)
-  return box
-})
 
 function pointerNdc(event: MouseEvent): THREE.Vector2 {
   const rect = renderer.domElement.getBoundingClientRect()
@@ -315,12 +376,12 @@ function pass() {
 }
 
 function resetBall() {
-  teammates.forEach((t, idx) => {
-    t.group.position.copy(startPositions[idx])
+  teammates.forEach((t) => {
+    t.group.position.copy(t.startPos)
     t.target = null
     t.marker.visible = false
   })
-  defenders.forEach((d, idx) => d.group.position.copy(defenderStarts[idx]))
+  defenders.forEach((d) => d.group.position.copy(d.startPos))
   setActive(0)
   ballVelocity.set(0, 0, 0)
   passTargetIdx = null
@@ -560,6 +621,35 @@ function updatePassIcons() {
     icon.style.visibility = 'visible'
   })
 }
+
+// --- Panel de plantilla: hasta 6 atacantes y 6 defensores ---
+const atkCountEl = document.getElementById('atk-count')!
+const defCountEl = document.getElementById('def-count')!
+let pendingAttackers = teammates.length
+let pendingDefenders = defenders.length
+
+document.getElementById('atk-minus')!.addEventListener('click', () => {
+  pendingAttackers = Math.max(MIN_ROSTER, pendingAttackers - 1)
+  atkCountEl.textContent = String(pendingAttackers)
+})
+document.getElementById('atk-plus')!.addEventListener('click', () => {
+  pendingAttackers = Math.min(MAX_ROSTER, pendingAttackers + 1)
+  atkCountEl.textContent = String(pendingAttackers)
+})
+document.getElementById('def-minus')!.addEventListener('click', () => {
+  pendingDefenders = Math.max(MIN_ROSTER, pendingDefenders - 1)
+  defCountEl.textContent = String(pendingDefenders)
+})
+document.getElementById('def-plus')!.addEventListener('click', () => {
+  pendingDefenders = Math.min(MAX_ROSTER, pendingDefenders + 1)
+  defCountEl.textContent = String(pendingDefenders)
+})
+document.getElementById('roster-apply')!.addEventListener('click', () => {
+  buildTeams(pendingAttackers, pendingDefenders)
+  scoreEl.textContent = 'Goles: 0'
+  score = 0
+  messageEl.textContent = `Equipos: ${pendingAttackers} atacantes vs ${pendingDefenders} defensores`
+})
 
 const clock = new THREE.Clock()
 function animate() {
