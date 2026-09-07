@@ -40,6 +40,13 @@ const DEFENDER_MIN_FROM_GOAL = GOAL_AREA_RADIUS
 const DEFENDER_MAX_FROM_GOAL = 18
 const DEFENDER_INTERCEPT_RADIUS = 0.85
 
+// El portero tarda un poco en reaccionar a un lanzamiento (como una persona
+// real, no puede leer el futuro): durante ese instante se queda centrado, lo
+// que da una ventana real para marcar a las esquinas si el disparo es rápido.
+const KEEPER_REACTION_DELAY = 0.22
+const GOAL_SLOWMO_DURATION = 0.9
+const GOAL_SLOWMO_SCALE = 0.25
+
 const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por detrás, en apoyo
 const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
 
@@ -108,6 +115,10 @@ let carryDistance = 0 // distancia recorrida por el portador activo sin pasar/la
 let isDribbling = false // true mientras el balón bota (solo visual + no cuenta pasos)
 let hasDribbled = false // ya gastaste tu único bote permitido en esta posesión
 let elapsedTime = 0
+let shotTargetZ: number | null = null // punto de la portería al que apunta el disparo en curso
+let shotTime = 0 // cuándo se lanzó, para simular el tiempo de reacción del portero
+let goalSlowMoUntil = 0 // ralentí breve al marcar, estilo videojuego
+let pendingReset: number | null = null // celebración: el balón se queda quieto en la red antes de reiniciar
 
 // --- Equipo ---
 interface Teammate {
@@ -408,6 +419,8 @@ function shootAt(groundPoint: THREE.Vector3) {
   ballVelocity = dir.multiplyScalar(speed)
   ballVelocity.y = SHOOT_ARC
   releaseBall()
+  shotTargetZ = target.z
+  shotTime = elapsedTime
   messageEl.textContent = '¡Lanzamiento!'
   playShoot()
 }
@@ -452,6 +465,7 @@ function resetBall() {
   possession = 0
   carryDistance = 0
   hasDribbled = false
+  shotTargetZ = null
 }
 
 // Saque tras balón fuera: siempre se lo queda el ataque, el compañero más
@@ -471,6 +485,7 @@ function giveBallToNearestAttacker(atPoint: THREE.Vector3) {
   ballVelocity.set(0, 0, 0)
   carryDistance = 0
   hasDribbled = false
+  shotTargetZ = null
   if (nearestIdx !== activeIndex) setActive(nearestIdx)
 }
 
@@ -606,6 +621,14 @@ function updateBallPass(dt: number) {
 }
 
 function updateBallFree(dt: number) {
+  if (pendingReset !== null) {
+    if (elapsedTime >= pendingReset) {
+      pendingReset = null
+      resetBall()
+    }
+    return
+  }
+
   possessionCooldown = Math.max(0, possessionCooldown - dt)
 
   if (passTargetIdx !== null) {
@@ -634,7 +657,9 @@ function updateBallFree(dt: number) {
     messageEl.textContent = '¡GOL! 🤾'
     playGoal()
     triggerGoalFlash()
-    resetBall()
+    goalSlowMoUntil = elapsedTime + GOAL_SLOWMO_DURATION
+    ballVelocity.set(0, 0, 0)
+    pendingReset = elapsedTime + GOAL_SLOWMO_DURATION + 0.5
     return
   }
 
@@ -644,6 +669,7 @@ function updateBallFree(dt: number) {
     ballVelocity.z += (Math.random() - 0.5) * 4
     messageEl.textContent = '¡Parada del portero!'
     playWhistle()
+    shotTargetZ = null
   }
 
   for (const defender of defenders) {
@@ -666,6 +692,7 @@ function updateBallFree(dt: number) {
       ballVelocity.set(0, 0, 0)
       carryDistance = 0
       hasDribbled = false
+      shotTargetZ = null
       playCatch()
       if (idx !== activeIndex) setActive(idx)
       return
@@ -681,9 +708,16 @@ function updateBallFree(dt: number) {
 }
 
 function updateKeeper(dt: number) {
-  const targetZ = THREE.MathUtils.clamp(ball.position.z, -GOAL_HALF_WIDTH + 0.2, GOAL_HALF_WIDTH - 0.2)
+  const reacting = shotTargetZ !== null && elapsedTime - shotTime < KEEPER_REACTION_DELAY
+  const aimZ = shotTargetZ ?? ball.position.z
+  const targetZ = reacting ? 0 : THREE.MathUtils.clamp(aimZ, -GOAL_HALF_WIDTH + 0.2, GOAL_HALF_WIDTH - 0.2)
   const dz = targetZ - keeper.position.z
-  keeper.position.z += THREE.MathUtils.clamp(dz, -KEEPER_SPEED * dt, KEEPER_SPEED * dt)
+  const step = THREE.MathUtils.clamp(dz, -KEEPER_SPEED * dt, KEEPER_SPEED * dt)
+  keeper.position.z += step
+
+  // Toque de "estirada": se inclina hacia el lado al que se mueve rápido.
+  const lean = THREE.MathUtils.clamp(-step * 6, -0.6, 0.6)
+  keeper.rotation.z = THREE.MathUtils.lerp(keeper.rotation.z, lean, 0.3)
 }
 
 const goalCenter = new THREE.Vector2(GOAL_LINE_X, 0)
@@ -747,6 +781,15 @@ const CAMERA_HEIGHT = 15
 const CAMERA_BACK = 24
 
 function updateCamera(dt: number) {
+  // Celebración de gol: primer plano dramático sobre el balón en la red,
+  // en vez del plano panorámico habitual, mientras dura el ralentí.
+  if (pendingReset !== null) {
+    const desired = new THREE.Vector3(ball.position.x - 5, CAMERA_HEIGHT * 0.4, ball.position.z - 8)
+    camera.position.lerp(desired, 1 - Math.pow(0.001, dt))
+    camera.lookAt(ball.position.x, 0.8, ball.position.z)
+    return
+  }
+
   // Cámara panorámica tipo retransmisión: sigue el juego a lo largo del campo
   // (eje X) pero mantiene siempre visible todo el ancho (eje Z) y a los 3 jugadores.
   let focusX = 0
@@ -826,8 +869,10 @@ rosterApplyBtn.addEventListener('click', async () => {
 
 const clock = new THREE.Clock()
 function animate() {
-  const dt = Math.min(clock.getDelta(), 0.05)
-  elapsedTime += dt
+  const rawDt = Math.min(clock.getDelta(), 0.05)
+  const inSlowMo = elapsedTime < goalSlowMoUntil
+  const dt = inSlowMo ? rawDt * GOAL_SLOWMO_SCALE : rawDt
+  elapsedTime += rawDt // avanza en tiempo real para que el ralentí dure lo mismo siempre
 
   updateActivePlayer(dt)
   teammates.forEach((t, idx) => {
