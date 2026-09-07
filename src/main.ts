@@ -101,7 +101,7 @@ let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hac
 let autoAdvance = true // los atacantes sin orden manual avanzan/retroceden siguiendo al balón
 let carryDistance = 0 // distancia recorrida por el portador activo sin pasar/lanzar ("pasos")
 let isDribbling = false // true mientras el balón bota (solo visual + no cuenta pasos)
-let caught = false // al parar una vez con el balón, "lo coges": ya no puedes volver a botar
+let hasDribbled = false // ya gastaste tu único bote permitido en esta posesión
 let elapsedTime = 0
 
 // --- Equipo ---
@@ -248,7 +248,7 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
   passTargetIdx = null
   ballVelocity.set(0, 0, 0)
   carryDistance = 0
-  caught = false
+  hasDribbled = false
 }
 
 function setActive(idx: number) {
@@ -429,7 +429,7 @@ function resetBall() {
   passTargetIdx = null
   possession = 0
   carryDistance = 0
-  caught = false
+  hasDribbled = false
 }
 
 function updateActivePlayer(dt: number) {
@@ -442,19 +442,17 @@ function updateActivePlayer(dt: number) {
   if (keys.has('d') || keys.has('arrowright')) move.z += 1
   const isMoving = move.lengthSq() > 0
 
-  // Automático, sin tecla: mientras avanzas, botas (no cuenta como pasos).
-  // En cuanto te paras con el balón, es como si lo cogieras con las dos manos:
-  // ya no puedes volver a botar en esta posesión, y si vuelves a correr te
-  // cuentan los pasos hasta que pases, lances o pierdas el balón.
-  if (possession === activeIndex) {
-    if (isMoving && !caught) {
-      isDribbling = true
-    } else {
-      isDribbling = false
-      if (!isMoving) caught = true
-    }
-  } else {
+  // Regla real, automática y sin tecla: primero tienes ~3 pasos; si los
+  // agotas sin haber botado todavía, se te permite empezar a botar para
+  // seguir avanzando (bote libre e ilimitado). En cuanto te paras mientras
+  // botas, es coger el balón con las dos manos: tienes otros ~3 pasos
+  // frescos, pero ya no puedes volver a botar (doble bote no permitido) —
+  // si los agotas también, lo pierdes.
+  if (possession !== activeIndex) {
     isDribbling = false
+  } else if (!isMoving && isDribbling) {
+    isDribbling = false
+    carryDistance = 0
   }
 
   if (isMoving) {
@@ -465,9 +463,17 @@ function updateActivePlayer(dt: number) {
     active.facing = move.clone()
     active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
 
-    if (possession === activeIndex && caught) {
+    if (possession === activeIndex && !isDribbling) {
       carryDistance += PLAYER_SPEED * dt
-      if (carryDistance > MAX_CARRY_DISTANCE) forceTurnover()
+      if (carryDistance > MAX_CARRY_DISTANCE) {
+        if (!hasDribbled) {
+          isDribbling = true
+          hasDribbled = true
+          carryDistance = 0
+        } else {
+          forceTurnover()
+        }
+      }
     }
   }
 }
@@ -544,7 +550,7 @@ function updateBallPass(dt: number) {
     passTargetIdx = null
     ballVelocity.set(0, 0, 0)
     carryDistance = 0
-    caught = false
+    hasDribbled = false
     playCatch()
     if (idx !== activeIndex) setActive(idx)
     return
@@ -615,7 +621,7 @@ function updateBallFree(dt: number) {
       possession = idx
       ballVelocity.set(0, 0, 0)
       carryDistance = 0
-      caught = false
+      hasDribbled = false
       playCatch()
       if (idx !== activeIndex) setActive(idx)
       return
