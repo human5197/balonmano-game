@@ -24,7 +24,7 @@ const TEAMMATE_SPEED = 5
 const BALL_RADIUS = 0.1
 const GRAVITY = -9.8
 const KEEPER_SPEED = 2
-const SHOOT_ARC = 3.2
+const SHOOT_ARC = 3.9
 const PASS_SPEED = 11
 const PASS_HEIGHT = 0.95
 const CATCH_RADIUS = 1.1
@@ -37,10 +37,15 @@ const FIELD_Z_LIMIT = 9.5
 const GOAL_AREA_RADIUS = 6.5
 
 const DEFENDER_SPEED = 4.2
-const DEFENDER_MARK_DISTANCE = 1.4 // se colocan entre su atacante y la portería
+const DEFENDER_MARK_DISTANCE = 2 // se colocan entre su atacante y la portería, a distancia de marcaje real
 const DEFENDER_MIN_FROM_GOAL = GOAL_AREA_RADIUS
 const DEFENDER_MAX_FROM_GOAL = 18
-const DEFENDER_INTERCEPT_RADIUS = 0.85
+const DEFENDER_INTERCEPT_RADIUS = 0.6 // brazos/bloqueo: hay que estar bien colocado, no basta con estar cerca
+// Un defensor solo puede bloquear un lanzamiento justo al soltarlo (como un
+// bloqueo real con los brazos), no perseguirlo durante todo el vuelo — si no,
+// el defensor que te marca (siempre casi en línea recta hacia portería) para
+// prácticamente cualquier tiro solo por estar cerca.
+const DEFENDER_BLOCK_WINDOW = 0.3
 
 // El portero tarda un poco en reaccionar a un lanzamiento (como una persona
 // real, no puede leer el futuro): durante ese instante se queda centrado, lo
@@ -741,15 +746,20 @@ function updateBallFree(dt: number) {
     shotTargetZ = null
   }
 
-  for (const defender of defenders) {
-    const dDef = defender.group.position.distanceTo(ball.position)
-    if (dDef < DEFENDER_INTERCEPT_RADIUS && ball.position.y < 1.4) {
-      ballVelocity.x *= -0.5
-      ballVelocity.z += (Math.random() - 0.5) * 5
-      ballVelocity.y = Math.max(ballVelocity.y, 1.5)
-      messageEl.textContent = '¡Balón interceptado por el defensor!'
-      playWhistle()
-      break
+  // Solo se puede bloquear un tiro justo al soltarlo; pasado ese instante, o si
+  // el balón está suelto por otro motivo (pérdida, rebote), no hay restricción.
+  const canBlockShot = shotTargetZ === null || elapsedTime - shotTime < DEFENDER_BLOCK_WINDOW
+  if (canBlockShot) {
+    for (const defender of defenders) {
+      const dDef = defender.group.position.distanceTo(ball.position)
+      if (dDef < DEFENDER_INTERCEPT_RADIUS && ball.position.y < 1.4) {
+        ballVelocity.x *= -0.5
+        ballVelocity.z += (Math.random() - 0.5) * 5
+        ballVelocity.y = Math.max(ballVelocity.y, 1.5)
+        messageEl.textContent = '¡Balón interceptado por el defensor!'
+        playWhistle()
+        break
+      }
     }
   }
 
