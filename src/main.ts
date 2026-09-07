@@ -100,7 +100,8 @@ let possessionCooldown = 0
 let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hacia este compañero
 let autoAdvance = true // los atacantes sin orden manual avanzan/retroceden siguiendo al balón
 let carryDistance = 0 // distancia recorrida por el portador activo sin pasar/lanzar ("pasos")
-let isDribbling = false // mantén Shift para botar: no cuenta como pasos y puedes seguir corriendo
+let isDribbling = false // true mientras el balón bota (solo visual + no cuenta pasos)
+let caught = false // al parar una vez con el balón, "lo coges": ya no puedes volver a botar
 let elapsedTime = 0
 
 // --- Equipo ---
@@ -247,6 +248,7 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
   passTargetIdx = null
   ballVelocity.set(0, 0, 0)
   carryDistance = 0
+  caught = false
 }
 
 function setActive(idx: number) {
@@ -427,23 +429,35 @@ function resetBall() {
   passTargetIdx = null
   possession = 0
   carryDistance = 0
+  caught = false
 }
 
 function updateActivePlayer(dt: number) {
   const active = teammates[activeIndex]
-
-  // Mantén Shift para botar: mientras botas no consumes "pasos" y puedes
-  // seguir corriendo indefinidamente, igual que en balonmano real.
-  isDribbling = possession === activeIndex && (keys.has('shift') || keys.has('shiftleft') || keys.has('shiftright'))
-  if (isDribbling) carryDistance = 0
 
   const move = new THREE.Vector3()
   if (keys.has('w') || keys.has('arrowup')) move.x += 1
   if (keys.has('s') || keys.has('arrowdown')) move.x -= 1
   if (keys.has('a') || keys.has('arrowleft')) move.z -= 1
   if (keys.has('d') || keys.has('arrowright')) move.z += 1
+  const isMoving = move.lengthSq() > 0
 
-  if (move.lengthSq() > 0) {
+  // Automático, sin tecla: mientras avanzas, botas (no cuenta como pasos).
+  // En cuanto te paras con el balón, es como si lo cogieras con las dos manos:
+  // ya no puedes volver a botar en esta posesión, y si vuelves a correr te
+  // cuentan los pasos hasta que pases, lances o pierdas el balón.
+  if (possession === activeIndex) {
+    if (isMoving && !caught) {
+      isDribbling = true
+    } else {
+      isDribbling = false
+      if (!isMoving) caught = true
+    }
+  } else {
+    isDribbling = false
+  }
+
+  if (isMoving) {
     move.normalize()
     active.group.position.addScaledVector(move, PLAYER_SPEED * dt)
     active.group.position.x = THREE.MathUtils.clamp(active.group.position.x, -FIELD_X_LIMIT, FIELD_X_LIMIT)
@@ -451,7 +465,7 @@ function updateActivePlayer(dt: number) {
     active.facing = move.clone()
     active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
 
-    if (possession === activeIndex && !isDribbling) {
+    if (possession === activeIndex && caught) {
       carryDistance += PLAYER_SPEED * dt
       if (carryDistance > MAX_CARRY_DISTANCE) forceTurnover()
     }
@@ -530,6 +544,7 @@ function updateBallPass(dt: number) {
     passTargetIdx = null
     ballVelocity.set(0, 0, 0)
     carryDistance = 0
+    caught = false
     playCatch()
     if (idx !== activeIndex) setActive(idx)
     return
@@ -600,6 +615,7 @@ function updateBallFree(dt: number) {
       possession = idx
       ballVelocity.set(0, 0, 0)
       carryDistance = 0
+      caught = false
       playCatch()
       if (idx !== activeIndex) setActive(idx)
       return
