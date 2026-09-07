@@ -40,6 +40,37 @@
         15% { opacity: 1; }
         100% { opacity: 0; }
       }
+      #power-meter {
+        position: absolute;
+        left: 50%;
+        bottom: 40px;
+        transform: translateX(-50%);
+        width: 220px;
+        pointer-events: none;
+        visibility: hidden;
+        text-align: center;
+        font-family: system-ui, sans-serif;
+      }
+      #power-meter .label {
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+        margin-bottom: 4px;
+        letter-spacing: 0.05em;
+      }
+      #power-meter .track {
+        height: 14px;
+        border-radius: 7px;
+        background: rgba(0, 0, 0, 0.5);
+        border: 2px solid rgba(255, 255, 255, 0.6);
+        overflow: hidden;
+      }
+      #power-meter .fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #22ff88, #ffdd33 60%, #ff3b3b);
+      }
       #pass-icons { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
       .pass-icon {
         position: absolute;
@@ -113,6 +144,7 @@
         <div class="score" id="score">Goles: 0</div>
         <div class="hint">
           WASD/flechas: mover · Click en un compañero o pulsa su número: pasarle el balón · Click en el campo: lanzar ahí ·
+          Mantén ESPACIO para cargar el disparo (A/D o flechas para apuntar dentro de la portería, suelta para lanzar) ·
           Tab: cambiar de jugador · Click derecho en compañero + campo: darle una posición · el anillo se pone rojo si
           agotas los pasos; entonces empiezas a botar solo, y si paras y vuelves a agotar los pasos sin poder botar
           otra vez, pierdes el balón
@@ -120,6 +152,10 @@
         <div class="message" id="message"></div>
       </div>
       <div id="pass-icons"></div>
+      <div id="power-meter">
+        <div class="label">FUERZA</div>
+        <div class="track"><div class="fill" id="power-fill"></div></div>
+      </div>
       <div id="goal-flash"></div>
       <div id="roster-panel">
         <div class="roster-row">

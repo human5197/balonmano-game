@@ -7,6 +7,8 @@ const app = document.getElementById('app')!
 const scoreEl = document.getElementById('score')!
 const messageEl = document.getElementById('message')!
 const goalFlashEl = document.getElementById('goal-flash')!
+const powerMeterEl = document.getElementById('power-meter')!
+const powerFillEl = document.getElementById('power-fill')!
 
 function triggerGoalFlash() {
   goalFlashEl.classList.remove('active')
@@ -46,6 +48,13 @@ const DEFENDER_INTERCEPT_RADIUS = 0.85
 const KEEPER_REACTION_DELAY = 0.22
 const GOAL_SLOWMO_DURATION = 0.9
 const GOAL_SLOWMO_SCALE = 0.25
+
+// Disparo cargado: mantén Espacio para cargar fuerza y usa A/D o las flechas
+// para apuntar a un punto de la portería; suelta Espacio para lanzar.
+const CHARGE_MAX_TIME = 0.9
+const CHARGE_MIN_POWER = 0.35
+const AIM_SPEED = 4.5
+const AIM_RANGE = GOAL_HALF_WIDTH * 1.6
 
 const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por detrás, en apoyo
 const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
@@ -105,6 +114,16 @@ const ball = new THREE.Mesh(
 ball.castShadow = true
 scene.add(ball)
 
+// Mira de puntería para el disparo cargado: una barra vertical en la línea de
+// gol que se desliza a los lados mientras cargas fuerza con Espacio.
+const aimMarker = new THREE.Mesh(
+  new THREE.BoxGeometry(0.12, GOAL_HEIGHT * 0.85, 0.12),
+  new THREE.MeshBasicMaterial({ color: 0xff3b3b, transparent: true, opacity: 0.85 }),
+)
+aimMarker.position.set(GOAL_LINE_X - 0.05, (GOAL_HEIGHT * 0.85) / 2, 0)
+aimMarker.visible = false
+scene.add(aimMarker)
+
 let ballVelocity = new THREE.Vector3()
 let possession = 0 // índice del compañero que tiene el balón, -1 si está suelto
 let lastHolder = -1
@@ -119,6 +138,9 @@ let shotTargetZ: number | null = null // punto de la portería al que apunta el 
 let shotTime = 0 // cuándo se lanzó, para simular el tiempo de reacción del portero
 let goalSlowMoUntil = 0 // ralentí breve al marcar, estilo videojuego
 let pendingReset: number | null = null // celebración: el balón se queda quieto en la red antes de reiniciar
+let charging = false // manteniendo Espacio: cargando fuerza y apuntando el disparo
+let chargeStart = 0
+let aimZ = 0
 
 // --- Equipo ---
 interface Teammate {
@@ -315,7 +337,7 @@ window.addEventListener('keydown', (e) => {
   keys.add(e.key.toLowerCase())
   if (e.key === ' ') {
     e.preventDefault()
-    shoot()
+    startCharging()
   }
   if (e.key.toLowerCase() === 'e') pass()
   if (e.key === 'Tab') {
@@ -325,7 +347,10 @@ window.addEventListener('keydown', (e) => {
   const n = Number(e.key)
   if (Number.isInteger(n) && n >= 1 && n <= teammates.length) choosePlayer(n - 1)
 })
-window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
+window.addEventListener('keyup', (e) => {
+  keys.delete(e.key.toLowerCase())
+  if (e.key === ' ') releaseCharge()
+})
 
 // --- Selección y órdenes con el ratón ---
 const raycaster = new THREE.Raycaster()
@@ -404,7 +429,7 @@ function forceTurnover() {
   playTurnover()
 }
 
-function shootAt(groundPoint: THREE.Vector3) {
+function shootAt(groundPoint: THREE.Vector3, power = 1) {
   if (possession !== activeIndex) return
   const target = new THREE.Vector3(
     THREE.MathUtils.clamp(groundPoint.x, -FIELD_X_LIMIT, FIELD_X_LIMIT),
@@ -415,9 +440,9 @@ function shootAt(groundPoint: THREE.Vector3) {
   const flat = new THREE.Vector2(target.x - from.x, target.z - from.z)
   const dist = Math.max(flat.length(), 0.01)
   const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
-  const speed = THREE.MathUtils.clamp(dist * 1.6, 8, 18)
+  const speed = THREE.MathUtils.clamp(dist * 1.6, 8, 18) * THREE.MathUtils.lerp(0.55, 1.2, power)
   ballVelocity = dir.multiplyScalar(speed)
-  ballVelocity.y = SHOOT_ARC
+  ballVelocity.y = THREE.MathUtils.lerp(SHOOT_ARC * 1.3, SHOOT_ARC * 0.75, power)
   releaseBall()
   shotTargetZ = target.z
   shotTime = elapsedTime
@@ -425,8 +450,46 @@ function shootAt(groundPoint: THREE.Vector3) {
   playShoot()
 }
 
-function shoot() {
-  shootAt(new THREE.Vector3(GOAL_LINE_X, 0, (Math.random() - 0.5) * GOAL_HALF_WIDTH * 1.6))
+function startCharging() {
+  if (possession !== activeIndex || charging) return
+  charging = true
+  chargeStart = elapsedTime
+  aimZ = THREE.MathUtils.clamp(ball.position.z, -AIM_RANGE, AIM_RANGE)
+  aimMarker.visible = true
+  powerMeterEl.style.visibility = 'visible'
+}
+
+function cancelCharging() {
+  charging = false
+  aimMarker.visible = false
+  powerMeterEl.style.visibility = 'hidden'
+  powerFillEl.style.width = '0%'
+}
+
+function releaseCharge() {
+  if (!charging) return
+  const power = THREE.MathUtils.clamp((elapsedTime - chargeStart) / CHARGE_MAX_TIME, CHARGE_MIN_POWER, 1)
+  cancelCharging()
+  shootAt(new THREE.Vector3(GOAL_LINE_X, 0, aimZ), power)
+}
+
+// Mientras se carga: el jugador se planta (sin moverse) y A/D o las flechas
+// mueven la mira dentro de la portería en vez de desplazarlo por el campo.
+function updateCharging(dt: number) {
+  if (!charging) return
+  if (possession !== activeIndex) {
+    cancelCharging()
+    return
+  }
+
+  let aimDir = 0
+  if (keys.has('a') || keys.has('arrowleft')) aimDir -= 1
+  if (keys.has('d') || keys.has('arrowright')) aimDir += 1
+  aimZ = THREE.MathUtils.clamp(aimZ + aimDir * AIM_SPEED * dt, -AIM_RANGE, AIM_RANGE)
+  aimMarker.position.z = aimZ
+
+  const power = THREE.MathUtils.clamp((elapsedTime - chargeStart) / CHARGE_MAX_TIME, 0, 1)
+  powerFillEl.style.width = `${power * 100}%`
 }
 
 function passTo(bestIdx: number) {
@@ -491,6 +554,12 @@ function giveBallToNearestAttacker(atPoint: THREE.Vector3) {
 
 function updateActivePlayer(dt: number) {
   const active = teammates[activeIndex]
+
+  if (charging) {
+    updateCharging(dt)
+    isDribbling = false
+    return
+  }
 
   const move = new THREE.Vector3()
   if (keys.has('w') || keys.has('arrowup')) move.x += 1
