@@ -7,10 +7,15 @@ const scoreEl = document.getElementById('score')!
 const messageEl = document.getElementById('message')!
 
 const PLAYER_SPEED = 6.5
+const TEAMMATE_SPEED = 5
 const BALL_RADIUS = 0.1
 const GRAVITY = -9.8
 const KEEPER_SPEED = 4.5
 const SHOOT_ARC = 3.2
+const PASS_SPEED = 9
+const CATCH_RADIUS = 0.9
+const FIELD_X_LIMIT = 19
+const FIELD_Z_LIMIT = 9.5
 
 // --- Escena base ---
 const scene = new THREE.Scene()
@@ -57,21 +62,69 @@ ball.castShadow = true
 scene.add(ball)
 
 let ballVelocity = new THREE.Vector3()
-let hasBall = true
+let possession = 0 // índice del compañero que tiene el balón, -1 si está suelto
+let lastHolder = -1
+let possessionCooldown = 0
 
-// --- Estado de entrada ---
-const keys = new Set<string>()
-window.addEventListener('keydown', (e) => keys.add(e.key.toLowerCase()))
-window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
-window.addEventListener('keydown', (e) => {
-  if (e.key === ' ') shoot()
-})
-renderer.domElement.addEventListener('click', () => shoot())
+// --- Equipo ---
+interface Teammate {
+  group: THREE.Group
+  ring: THREE.Mesh
+  marker: THREE.Mesh
+  facing: THREE.Vector3
+  target: THREE.Vector3 | null
+}
 
-// --- Jugador y portero ---
-const player = await loadCharacter('/models/player.glb', 0x2b6cff)
-player.position.set(-10, 0, 0)
-scene.add(player)
+function createRing(color: number): THREE.Mesh {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.35, 0.5, 24),
+    new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.9 }),
+  )
+  ring.rotation.x = -Math.PI / 2
+  ring.position.y = 0.03
+  ring.visible = false
+  return ring
+}
+
+function createMarker(): THREE.Mesh {
+  const marker = new THREE.Mesh(
+    new THREE.RingGeometry(0.18, 0.28, 20),
+    new THREE.MeshBasicMaterial({ color: 0xffdd33, side: THREE.DoubleSide }),
+  )
+  marker.rotation.x = -Math.PI / 2
+  marker.position.y = 0.02
+  marker.visible = false
+  scene.add(marker)
+  return marker
+}
+
+const startPositions = [
+  new THREE.Vector3(-10, 0, 0),
+  new THREE.Vector3(-14, 0, -6),
+  new THREE.Vector3(-14, 0, 6),
+]
+const tints = [0x2b6cff, 0x22c1ff, 0x22ffb0]
+
+const teammates: Teammate[] = []
+for (let i = 0; i < 3; i++) {
+  const group = await loadCharacter('/models/player.glb', tints[i])
+  group.position.copy(startPositions[i])
+  const ring = createRing(0x22ff88)
+  group.add(ring)
+  scene.add(group)
+  teammates.push({ group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null })
+}
+
+let activeIndex = 0
+let tacticalSelected: number | null = null
+
+function setActive(idx: number) {
+  if (idx === activeIndex) return
+  activeIndex = idx
+  teammates[activeIndex].target = null
+  if (tacticalSelected === idx) tacticalSelected = null
+  messageEl.textContent = `Controlas al jugador ${idx + 1}`
+}
 
 const keeper = await loadCharacter('/models/keeper.glb', 0xff3b3b)
 keeper.position.set(GOAL_LINE_X - 0.8, 0, 0)
@@ -79,10 +132,82 @@ keeper.rotation.y = -Math.PI / 2
 scene.add(keeper)
 
 let score = 0
-let facing = new THREE.Vector3(1, 0, 0)
+
+// --- Entrada de teclado ---
+const keys = new Set<string>()
+window.addEventListener('keydown', (e) => {
+  keys.add(e.key.toLowerCase())
+  if (e.key === ' ') {
+    e.preventDefault()
+    shoot()
+  }
+  if (e.key.toLowerCase() === 'e') pass()
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    setActive((activeIndex + 1) % teammates.length)
+  }
+  if (['1', '2', '3'].includes(e.key)) setActive(Number(e.key) - 1)
+})
+window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
+
+// --- Selección y órdenes con el ratón ---
+const raycaster = new THREE.Raycaster()
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+const hitboxes = teammates.map((t, idx) => {
+  const box = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.6, 0.6, 2, 12),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
+  )
+  box.position.y = 1
+  box.userData.idx = idx
+  t.group.add(box)
+  return box
+})
+
+renderer.domElement.addEventListener('click', (event) => {
+  const rect = renderer.domElement.getBoundingClientRect()
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  )
+  raycaster.setFromCamera(ndc, camera)
+
+  const hit = raycaster.intersectObjects(hitboxes, false)[0]
+  if (hit) {
+    const idx = hit.object.userData.idx as number
+    if (idx !== activeIndex) {
+      tacticalSelected = idx
+      messageEl.textContent = `Jugador ${idx + 1} seleccionado. Click en el campo para moverlo.`
+    }
+    return
+  }
+
+  if (tacticalSelected !== null) {
+    const point = new THREE.Vector3()
+    if (raycaster.ray.intersectPlane(groundPlane, point)) {
+      point.x = THREE.MathUtils.clamp(point.x, -FIELD_X_LIMIT, FIELD_X_LIMIT)
+      point.z = THREE.MathUtils.clamp(point.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+      teammates[tacticalSelected].target = point.clone()
+      const marker = teammates[tacticalSelected].marker
+      marker.position.set(point.x, 0.02, point.z)
+      marker.visible = true
+    }
+  }
+})
+
+renderer.domElement.addEventListener('contextmenu', (event) => {
+  event.preventDefault()
+  tacticalSelected = null
+})
+
+function releaseBall() {
+  lastHolder = possession
+  possession = -1
+  possessionCooldown = 0.35
+}
 
 function shoot() {
-  if (!hasBall) return
+  if (possession !== activeIndex) return
   const target = new THREE.Vector3(GOAL_LINE_X, 0.9, (Math.random() - 0.5) * GOAL_HALF_WIDTH * 1.6)
   const from = ball.position.clone()
   const flat = new THREE.Vector2(target.x - from.x, target.z - from.z)
@@ -91,17 +216,47 @@ function shoot() {
   const speed = THREE.MathUtils.clamp(dist * 1.6, 8, 16)
   ballVelocity = dir.multiplyScalar(speed)
   ballVelocity.y = SHOOT_ARC
-  hasBall = false
+  releaseBall()
   messageEl.textContent = '¡Lanzamiento!'
 }
 
-function resetBall() {
-  player.position.set(-10, 0, 0)
-  ballVelocity.set(0, 0, 0)
-  hasBall = true
+function pass() {
+  if (possession !== activeIndex) return
+  let bestIdx = -1
+  let bestDist = Infinity
+  teammates.forEach((t, idx) => {
+    if (idx === activeIndex) return
+    const d = t.group.position.distanceTo(ball.position)
+    if (d < bestDist) {
+      bestDist = d
+      bestIdx = idx
+    }
+  })
+  if (bestIdx === -1) return
+
+  const targetPos = teammates[bestIdx].group.position
+  const flat = new THREE.Vector2(targetPos.x - ball.position.x, targetPos.z - ball.position.z)
+  const dist = flat.length()
+  const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
+  ballVelocity = dir.multiplyScalar(PASS_SPEED)
+  ballVelocity.y = 2.4
+  releaseBall()
+  messageEl.textContent = `Pase al jugador ${bestIdx + 1}`
 }
 
-function updatePlayer(dt: number) {
+function resetBall() {
+  teammates.forEach((t, idx) => {
+    t.group.position.copy(startPositions[idx])
+    t.target = null
+    t.marker.visible = false
+  })
+  setActive(0)
+  ballVelocity.set(0, 0, 0)
+  possession = 0
+}
+
+function updateActivePlayer(dt: number) {
+  const active = teammates[activeIndex]
   const move = new THREE.Vector3()
   if (keys.has('w') || keys.has('arrowup')) move.x += 1
   if (keys.has('s') || keys.has('arrowdown')) move.x -= 1
@@ -110,27 +265,38 @@ function updatePlayer(dt: number) {
 
   if (move.lengthSq() > 0) {
     move.normalize()
-    player.position.addScaledVector(move, PLAYER_SPEED * dt)
-    player.position.x = THREE.MathUtils.clamp(player.position.x, -19, 19)
-    player.position.z = THREE.MathUtils.clamp(player.position.z, -9.5, 9.5)
-    facing = move.clone()
-    player.rotation.y = Math.atan2(facing.x, facing.z) + Math.PI / 2
-  }
-
-  if (hasBall) {
-    const holdOffset = facing.clone().multiplyScalar(0.55)
-    ball.position.set(player.position.x + holdOffset.x, 0.95, player.position.z + holdOffset.z)
-  } else {
-    const dist = player.position.distanceTo(ball.position)
-    if (dist < 1 && ball.position.y < 0.5) {
-      hasBall = true
-      messageEl.textContent = '¡Balón recuperado! Espacio o click para lanzar'
-    }
+    active.group.position.addScaledVector(move, PLAYER_SPEED * dt)
+    active.group.position.x = THREE.MathUtils.clamp(active.group.position.x, -FIELD_X_LIMIT, FIELD_X_LIMIT)
+    active.group.position.z = THREE.MathUtils.clamp(active.group.position.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+    active.facing = move.clone()
+    active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
   }
 }
 
-function updateBall(dt: number) {
-  if (hasBall) return
+function updateTeammateAI(t: Teammate, dt: number) {
+  if (!t.target) return
+  const pos = t.group.position
+  const dx = t.target.x - pos.x
+  const dz = t.target.z - pos.z
+  const dist = Math.hypot(dx, dz)
+  if (dist < 0.15) {
+    t.marker.visible = false
+    return
+  }
+  const dir = new THREE.Vector3(dx / dist, 0, dz / dist)
+  pos.addScaledVector(dir, Math.min(TEAMMATE_SPEED * dt, dist))
+  t.facing = dir
+  t.group.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI / 2
+}
+
+function updateBallHeld() {
+  const holder = teammates[possession]
+  const holdOffset = holder.facing.clone().multiplyScalar(0.55)
+  ball.position.set(holder.group.position.x + holdOffset.x, 0.95, holder.group.position.z + holdOffset.z)
+}
+
+function updateBallFree(dt: number) {
+  possessionCooldown = Math.max(0, possessionCooldown - dt)
 
   ballVelocity.y += GRAVITY * dt
   ball.position.addScaledVector(ballVelocity, dt)
@@ -162,10 +328,20 @@ function updateBall(dt: number) {
     messageEl.textContent = '¡Parada del portero!'
   }
 
-  const outOfBounds =
-    ball.position.x < -20.5 || ball.position.x > 20.5 || Math.abs(ball.position.z) > 10.5
+  for (let idx = 0; idx < teammates.length; idx++) {
+    if (idx === lastHolder && possessionCooldown > 0) continue
+    const d = teammates[idx].group.position.distanceTo(ball.position)
+    if (d < CATCH_RADIUS && ball.position.y < 1.3) {
+      possession = idx
+      ballVelocity.set(0, 0, 0)
+      if (idx !== activeIndex) setActive(idx)
+      return
+    }
+  }
+
+  const outOfBounds = ball.position.x < -20.5 || ball.position.x > 20.5 || Math.abs(ball.position.z) > 10.5
   if (outOfBounds) {
-    messageEl.textContent = 'Balón fuera. Acércate para recuperarlo.'
+    messageEl.textContent = 'Balón fuera.'
     ballVelocity.set(0, 0, 0)
   }
 }
@@ -176,11 +352,26 @@ function updateKeeper(dt: number) {
   keeper.position.z += THREE.MathUtils.clamp(dz, -KEEPER_SPEED * dt, KEEPER_SPEED * dt)
 }
 
+function updateRings() {
+  teammates.forEach((t, idx) => {
+    if (idx === activeIndex) {
+      t.ring.visible = true
+      ;(t.ring.material as THREE.MeshBasicMaterial).color.setHex(0x22ff88)
+    } else if (idx === tacticalSelected) {
+      t.ring.visible = true
+      ;(t.ring.material as THREE.MeshBasicMaterial).color.setHex(0xffdd33)
+    } else {
+      t.ring.visible = false
+    }
+  })
+}
+
 function updateCamera(dt: number) {
-  const back = facing.clone().multiplyScalar(-5)
-  const desired = new THREE.Vector3(player.position.x + back.x, 3.2, player.position.z + back.z)
+  const active = teammates[activeIndex]
+  const back = active.facing.clone().multiplyScalar(-5)
+  const desired = new THREE.Vector3(active.group.position.x + back.x, 3.2, active.group.position.z + back.z)
   camera.position.lerp(desired, 1 - Math.pow(0.001, dt))
-  const lookAt = player.position.clone().addScaledVector(facing, 3)
+  const lookAt = active.group.position.clone().addScaledVector(active.facing, 3)
   lookAt.y = 1
   camera.lookAt(lookAt)
 }
@@ -188,10 +379,19 @@ function updateCamera(dt: number) {
 const clock = new THREE.Clock()
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05)
-  updatePlayer(dt)
-  updateBall(dt)
+
+  updateActivePlayer(dt)
+  teammates.forEach((t, idx) => {
+    if (idx !== activeIndex) updateTeammateAI(t, dt)
+  })
+
+  if (possession >= 0) updateBallHeld()
+  else updateBallFree(dt)
+
   updateKeeper(dt)
+  updateRings()
   updateCamera(dt)
+
   renderer.render(scene, camera)
   requestAnimationFrame(animate)
 }
