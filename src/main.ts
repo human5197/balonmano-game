@@ -164,20 +164,44 @@ const hitboxes = teammates.map((t, idx) => {
   return box
 })
 
-renderer.domElement.addEventListener('click', (event) => {
+function pointerNdc(event: MouseEvent): THREE.Vector2 {
   const rect = renderer.domElement.getBoundingClientRect()
-  const ndc = new THREE.Vector2(
+  return new THREE.Vector2(
     ((event.clientX - rect.left) / rect.width) * 2 - 1,
     -((event.clientY - rect.top) / rect.height) * 2 + 1,
   )
-  raycaster.setFromCamera(ndc, camera)
+}
+
+// Click izquierdo: con balón, decide a quién pasar (click en un compañero)
+// o a dónde lanzar (click en el campo/portería).
+renderer.domElement.addEventListener('click', (event) => {
+  raycaster.setFromCamera(pointerNdc(event), camera)
+
+  const hit = raycaster.intersectObjects(hitboxes, false)[0]
+  if (hit) {
+    const idx = hit.object.userData.idx as number
+    if (idx !== activeIndex) passTo(idx)
+    return
+  }
+
+  if (possession !== activeIndex) return
+  const point = new THREE.Vector3()
+  if (raycaster.ray.intersectPlane(groundPlane, point)) {
+    shootAt(point)
+  }
+})
+
+// Click derecho: selecciona a un compañero y le asigna una posición en el campo.
+renderer.domElement.addEventListener('contextmenu', (event) => {
+  event.preventDefault()
+  raycaster.setFromCamera(pointerNdc(event), camera)
 
   const hit = raycaster.intersectObjects(hitboxes, false)[0]
   if (hit) {
     const idx = hit.object.userData.idx as number
     if (idx !== activeIndex) {
       tacticalSelected = idx
-      messageEl.textContent = `Jugador ${idx + 1} seleccionado. Click en el campo para moverlo.`
+      messageEl.textContent = `Jugador ${idx + 1} seleccionado. Click derecho en el campo para moverlo.`
     }
     return
   }
@@ -195,29 +219,44 @@ renderer.domElement.addEventListener('click', (event) => {
   }
 })
 
-renderer.domElement.addEventListener('contextmenu', (event) => {
-  event.preventDefault()
-  tacticalSelected = null
-})
-
 function releaseBall() {
   lastHolder = possession
   possession = -1
   possessionCooldown = 0.35
 }
 
-function shoot() {
+function shootAt(groundPoint: THREE.Vector3) {
   if (possession !== activeIndex) return
-  const target = new THREE.Vector3(GOAL_LINE_X, 0.9, (Math.random() - 0.5) * GOAL_HALF_WIDTH * 1.6)
+  const target = new THREE.Vector3(
+    THREE.MathUtils.clamp(groundPoint.x, -FIELD_X_LIMIT, FIELD_X_LIMIT),
+    0.9,
+    THREE.MathUtils.clamp(groundPoint.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT),
+  )
   const from = ball.position.clone()
   const flat = new THREE.Vector2(target.x - from.x, target.z - from.z)
-  const dist = flat.length()
+  const dist = Math.max(flat.length(), 0.01)
   const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
-  const speed = THREE.MathUtils.clamp(dist * 1.6, 8, 16)
+  const speed = THREE.MathUtils.clamp(dist * 1.6, 8, 18)
   ballVelocity = dir.multiplyScalar(speed)
   ballVelocity.y = SHOOT_ARC
   releaseBall()
   messageEl.textContent = '¡Lanzamiento!'
+}
+
+function shoot() {
+  shootAt(new THREE.Vector3(GOAL_LINE_X, 0, (Math.random() - 0.5) * GOAL_HALF_WIDTH * 1.6))
+}
+
+function passTo(bestIdx: number) {
+  if (possession !== activeIndex || bestIdx === activeIndex) return
+  const targetPos = teammates[bestIdx].group.position
+  const flat = new THREE.Vector2(targetPos.x - ball.position.x, targetPos.z - ball.position.z)
+  const dist = flat.length()
+  const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
+  ballVelocity = dir.multiplyScalar(PASS_SPEED)
+  ballVelocity.y = 2.4
+  releaseBall()
+  messageEl.textContent = `Pase al jugador ${bestIdx + 1}`
 }
 
 function pass() {
@@ -232,16 +271,7 @@ function pass() {
       bestIdx = idx
     }
   })
-  if (bestIdx === -1) return
-
-  const targetPos = teammates[bestIdx].group.position
-  const flat = new THREE.Vector2(targetPos.x - ball.position.x, targetPos.z - ball.position.z)
-  const dist = flat.length()
-  const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
-  ballVelocity = dir.multiplyScalar(PASS_SPEED)
-  ballVelocity.y = 2.4
-  releaseBall()
-  messageEl.textContent = `Pase al jugador ${bestIdx + 1}`
+  if (bestIdx !== -1) passTo(bestIdx)
 }
 
 function resetBall() {
@@ -366,14 +396,19 @@ function updateRings() {
   })
 }
 
+const CAMERA_HEIGHT = 15
+const CAMERA_BACK = 24
+
 function updateCamera(dt: number) {
-  const active = teammates[activeIndex]
-  const back = active.facing.clone().multiplyScalar(-5)
-  const desired = new THREE.Vector3(active.group.position.x + back.x, 3.2, active.group.position.z + back.z)
-  camera.position.lerp(desired, 1 - Math.pow(0.001, dt))
-  const lookAt = active.group.position.clone().addScaledVector(active.facing, 3)
-  lookAt.y = 1
-  camera.lookAt(lookAt)
+  // Cámara panorámica tipo retransmisión: sigue el juego a lo largo del campo
+  // (eje X) pero mantiene siempre visible todo el ancho (eje Z) y a los 3 jugadores.
+  let focusX = 0
+  teammates.forEach((t) => (focusX += t.group.position.x))
+  focusX = THREE.MathUtils.clamp(focusX / teammates.length, -FIELD_X_LIMIT, FIELD_X_LIMIT)
+
+  const desired = new THREE.Vector3(focusX, CAMERA_HEIGHT, -CAMERA_BACK)
+  camera.position.lerp(desired, 1 - Math.pow(0.0005, dt))
+  camera.lookAt(focusX, 0.5, 0)
 }
 
 const clock = new THREE.Clock()
