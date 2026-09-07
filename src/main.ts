@@ -23,7 +23,7 @@ const PLAYER_SPEED = 6.5
 const TEAMMATE_SPEED = 5
 const BALL_RADIUS = 0.1
 const GRAVITY = -9.8
-const KEEPER_SPEED = 3.2
+const KEEPER_SPEED = 2
 const SHOOT_ARC = 3.2
 const PASS_SPEED = 11
 const PASS_HEIGHT = 0.95
@@ -45,7 +45,7 @@ const DEFENDER_INTERCEPT_RADIUS = 0.85
 // El portero tarda un poco en reaccionar a un lanzamiento (como una persona
 // real, no puede leer el futuro): durante ese instante se queda centrado, lo
 // que da una ventana real para marcar a las esquinas si el disparo es rápido.
-const KEEPER_REACTION_DELAY = 0.22
+const KEEPER_REACTION_DELAY = 0.32
 const GOAL_SLOWMO_DURATION = 0.9
 const GOAL_SLOWMO_SCALE = 0.25
 
