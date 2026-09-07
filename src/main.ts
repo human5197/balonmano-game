@@ -18,6 +18,12 @@ const CATCH_RADIUS = 1.1
 const FIELD_X_LIMIT = 19
 const FIELD_Z_LIMIT = 9.5
 
+const DEFENDER_SPEED = 4.2
+const DEFENDER_MARK_DISTANCE = 1.4 // se colocan entre su atacante y la portería
+const DEFENDER_MIN_FROM_GOAL = 6.5 // no invaden el área de 6m
+const DEFENDER_MAX_FROM_GOAL = 18
+const DEFENDER_INTERCEPT_RADIUS = 0.85
+
 // --- Escena base ---
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x87ceeb)
@@ -149,6 +155,27 @@ const keeper = await loadCharacter('/models/keeper.glb', 0xff3b3b)
 keeper.position.set(GOAL_LINE_X - 0.8, 0, 0)
 keeper.rotation.y = -Math.PI / 2
 scene.add(keeper)
+
+// --- Defensores rivales: marcaje individual, uno por cada atacante ---
+interface Defender {
+  group: THREE.Group
+  marks: number // índice del compañero al que marca
+}
+
+const defenderStarts = [
+  new THREE.Vector3(12, 0, 0),
+  new THREE.Vector3(14, 0, -6),
+  new THREE.Vector3(14, 0, 6),
+]
+
+const defenders: Defender[] = []
+for (let i = 0; i < 3; i++) {
+  const group = await loadCharacter('/models/keeper.glb', 0x7a1414)
+  group.position.copy(defenderStarts[i])
+  group.rotation.y = -Math.PI / 2
+  scene.add(group)
+  defenders.push({ group, marks: i })
+}
 
 let score = 0
 
@@ -293,6 +320,7 @@ function resetBall() {
     t.target = null
     t.marker.visible = false
   })
+  defenders.forEach((d, idx) => d.group.position.copy(defenderStarts[idx]))
   setActive(0)
   ballVelocity.set(0, 0, 0)
   passTargetIdx = null
@@ -355,6 +383,15 @@ function updateBallPass(dt: number) {
     return
   }
 
+  for (const defender of defenders) {
+    if (defender.group.position.distanceTo(ball.position) < DEFENDER_INTERCEPT_RADIUS) {
+      passTargetIdx = null
+      ballVelocity.set((Math.random() - 0.5) * 4, 2, (Math.random() - 0.5) * 6)
+      messageEl.textContent = '¡Pase interceptado por el defensor!'
+      return
+    }
+  }
+
   if (dist < CATCH_RADIUS) {
     possession = idx
     passTargetIdx = null
@@ -406,6 +443,17 @@ function updateBallFree(dt: number) {
     messageEl.textContent = '¡Parada del portero!'
   }
 
+  for (const defender of defenders) {
+    const dDef = defender.group.position.distanceTo(ball.position)
+    if (dDef < DEFENDER_INTERCEPT_RADIUS && ball.position.y < 1.4) {
+      ballVelocity.x *= -0.5
+      ballVelocity.z += (Math.random() - 0.5) * 5
+      ballVelocity.y = Math.max(ballVelocity.y, 1.5)
+      messageEl.textContent = '¡Balón interceptado por el defensor!'
+      break
+    }
+  }
+
   for (let idx = 0; idx < teammates.length; idx++) {
     if (idx === lastHolder && possessionCooldown > 0) continue
     const d = teammates[idx].group.position.distanceTo(ball.position)
@@ -428,6 +476,39 @@ function updateKeeper(dt: number) {
   const targetZ = THREE.MathUtils.clamp(ball.position.z, -GOAL_HALF_WIDTH + 0.2, GOAL_HALF_WIDTH - 0.2)
   const dz = targetZ - keeper.position.z
   keeper.position.z += THREE.MathUtils.clamp(dz, -KEEPER_SPEED * dt, KEEPER_SPEED * dt)
+}
+
+const goalCenter = new THREE.Vector2(GOAL_LINE_X, 0)
+
+function updateDefenders(dt: number) {
+  for (const defender of defenders) {
+    const attacker = teammates[defender.marks].group.position
+
+    // Se colocan entre su atacante marcado y la portería (marcaje "goal-side").
+    const toGoal = new THREE.Vector2(goalCenter.x - attacker.x, goalCenter.y - attacker.z)
+    toGoal.normalize()
+
+    let markX = attacker.x + toGoal.x * DEFENDER_MARK_DISTANCE
+    let markZ = attacker.z + toGoal.y * DEFENDER_MARK_DISTANCE
+
+    // No dejan su zona defensiva: ni se meten en el área de 6m ni suben demasiado.
+    const fromGoal = new THREE.Vector2(markX - goalCenter.x, markZ - goalCenter.y)
+    const distFromGoal = THREE.MathUtils.clamp(fromGoal.length(), DEFENDER_MIN_FROM_GOAL, DEFENDER_MAX_FROM_GOAL)
+    fromGoal.normalize().multiplyScalar(distFromGoal)
+    markX = goalCenter.x + fromGoal.x
+    markZ = THREE.MathUtils.clamp(goalCenter.y + fromGoal.y, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+
+    const pos = defender.group.position
+    const dx = markX - pos.x
+    const dz = markZ - pos.z
+    const dist = Math.hypot(dx, dz)
+    if (dist > 0.05) {
+      const step = Math.min(DEFENDER_SPEED * dt, dist)
+      pos.x += (dx / dist) * step
+      pos.z += (dz / dist) * step
+      defender.group.rotation.y = Math.atan2(dx, dz) + Math.PI / 2
+    }
+  }
 }
 
 function updateRings() {
@@ -493,6 +574,7 @@ function animate() {
   else updateBallFree(dt)
 
   updateKeeper(dt)
+  updateDefenders(dt)
   updateRings()
   updateCamera(dt)
   updatePassIcons()
