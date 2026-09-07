@@ -107,6 +107,8 @@ const startPositions = [
 ]
 const tints = [0x2b6cff, 0x22c1ff, 0x22ffb0]
 
+const passIconsEl = document.getElementById('pass-icons')!
+const passIcons: HTMLDivElement[] = []
 const teammates: Teammate[] = []
 for (let i = 0; i < 3; i++) {
   const group = await loadCharacter('/models/player.glb', tints[i])
@@ -115,6 +117,13 @@ for (let i = 0; i < 3; i++) {
   group.add(ring)
   scene.add(group)
   teammates.push({ group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null })
+
+  const icon = document.createElement('div')
+  icon.className = 'pass-icon'
+  icon.textContent = String(i + 1)
+  icon.addEventListener('click', () => choosePlayer(i))
+  passIconsEl.appendChild(icon)
+  passIcons.push(icon)
 }
 
 let activeIndex = 0
@@ -126,6 +135,14 @@ function setActive(idx: number) {
   teammates[activeIndex].target = null
   if (tacticalSelected === idx) tacticalSelected = null
   messageEl.textContent = `Controlas al jugador ${idx + 1}`
+}
+
+// Si tienes el balón, elegir a un compañero se lo pasa (como en FIFA: botón/click
+// sobre el receptor). Si no lo tienes, simplemente cambia el control a él.
+function choosePlayer(idx: number) {
+  if (idx === activeIndex || idx < 0 || idx >= teammates.length) return
+  if (possession === activeIndex) passTo(idx)
+  else setActive(idx)
 }
 
 const keeper = await loadCharacter('/models/keeper.glb', 0xff3b3b)
@@ -148,7 +165,7 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault()
     setActive((activeIndex + 1) % teammates.length)
   }
-  if (['1', '2', '3'].includes(e.key)) setActive(Number(e.key) - 1)
+  if (['1', '2', '3'].includes(e.key)) choosePlayer(Number(e.key) - 1)
 })
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()))
 
@@ -157,10 +174,10 @@ const raycaster = new THREE.Raycaster()
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
 const hitboxes = teammates.map((t, idx) => {
   const box = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.6, 0.6, 2, 12),
+    new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
     new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
   )
-  box.position.y = 1
+  box.position.y = 1.1
   box.userData.idx = idx
   t.group.add(box)
   return box
@@ -181,10 +198,7 @@ renderer.domElement.addEventListener('click', (event) => {
 
   const hit = raycaster.intersectObjects(hitboxes, false)[0]
   if (hit) {
-    const idx = hit.object.userData.idx as number
-    if (idx === activeIndex) return
-    if (possession === activeIndex) passTo(idx)
-    else setActive(idx)
+    choosePlayer(hit.object.userData.idx as number)
     return
   }
 
@@ -445,6 +459,27 @@ function updateCamera(dt: number) {
   camera.lookAt(focusX, 0.5, 0)
 }
 
+// Iconos "estilo FIFA" sobre los compañeros a los que puedes pasar ahora mismo.
+const projectVec = new THREE.Vector3()
+function updatePassIcons() {
+  const canPass = possession === activeIndex
+  teammates.forEach((t, idx) => {
+    const icon = passIcons[idx]
+    if (idx === activeIndex || !canPass) {
+      icon.style.visibility = 'hidden'
+      return
+    }
+    projectVec.set(t.group.position.x, 2.1, t.group.position.z).project(camera)
+    if (projectVec.z > 1) {
+      icon.style.visibility = 'hidden'
+      return
+    }
+    icon.style.left = `${(projectVec.x * 0.5 + 0.5) * window.innerWidth}px`
+    icon.style.top = `${(-projectVec.y * 0.5 + 0.5) * window.innerHeight}px`
+    icon.style.visibility = 'visible'
+  })
+}
+
 const clock = new THREE.Clock()
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05)
@@ -460,6 +495,7 @@ function animate() {
   updateKeeper(dt)
   updateRings()
   updateCamera(dt)
+  updatePassIcons()
 
   renderer.render(scene, camera)
   requestAnimationFrame(animate)
