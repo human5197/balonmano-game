@@ -22,7 +22,24 @@
       }
       #hud .score { font-size: 24px; font-weight: 700; }
       #hud .hint { font-size: 14px; opacity: 0.85; margin-top: 4px; }
-      #hud .message { font-size: 18px; margin-top: 8px; min-height: 22px; }
+      #hud .message { font-size: 18px; margin-top: 8px; min-height: 22px; transition: font-size 0.15s, color 0.15s; }
+      #hud .message.goal { font-size: 34px; font-weight: 800; color: #ffe066; }
+      #goal-flash {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        background: radial-gradient(circle, rgba(255, 224, 102, 0.55) 0%, rgba(255, 224, 102, 0) 70%);
+        opacity: 0;
+      }
+      #goal-flash.active { animation: goal-flash-pulse 0.9s ease-out; }
+      @keyframes goal-flash-pulse {
+        0% { opacity: 0; }
+        15% { opacity: 1; }
+        100% { opacity: 0; }
+      }
       #pass-icons { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
       .pass-icon {
         position: absolute;
@@ -96,11 +113,13 @@
         <div class="score" id="score">Goles: 0</div>
         <div class="hint">
           WASD/flechas: mover · Click en un compañero o pulsa su número: pasarle el balón · Click en el campo: lanzar ahí ·
-          Tab: cambiar de jugador · Click derecho en compañero + campo: darle una posición
+          Tab: cambiar de jugador · Click derecho en compañero + campo: darle una posición · el anillo se pone rojo si
+          corres demasiado con el balón (pasos)
         </div>
         <div class="message" id="message"></div>
       </div>
       <div id="pass-icons"></div>
+      <div id="goal-flash"></div>
       <div id="roster-panel">
         <div class="roster-row">
           <span><span class="dot" style="background:#1f5fff"></span>Atacantes</span>

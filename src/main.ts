@@ -1,10 +1,21 @@
 import * as THREE from 'three'
 import { buildCourt, buildGoal, GOAL_LINE_X, GOAL_HALF_WIDTH, GOAL_HEIGHT } from './game/court'
 import { loadCharacter } from './game/loadCharacter'
+import { playPass, playShoot, playGoal, playWhistle, playTurnover, playCatch } from './game/sound'
 
 const app = document.getElementById('app')!
 const scoreEl = document.getElementById('score')!
 const messageEl = document.getElementById('message')!
+const goalFlashEl = document.getElementById('goal-flash')!
+
+function triggerGoalFlash() {
+  goalFlashEl.classList.remove('active')
+  // Forzar reflow para poder relanzar la animación aunque se marquen goles seguidos.
+  void goalFlashEl.offsetWidth
+  goalFlashEl.classList.add('active')
+  messageEl.classList.add('goal')
+  setTimeout(() => messageEl.classList.remove('goal'), 1600)
+}
 
 const PLAYER_SPEED = 6.5
 const TEAMMATE_SPEED = 5
@@ -26,6 +37,8 @@ const DEFENDER_INTERCEPT_RADIUS = 0.85
 
 const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por detrás, en apoyo
 const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
+
+const MAX_CARRY_DISTANCE = 3 // "3 pasos" simplificados: metros que puedes correr con el balón sin botar/pasar
 
 const ATTACKER_COLOR = 0x1f5fff
 const DEFENDER_COLOR = 0xe02020
@@ -83,6 +96,7 @@ let lastHolder = -1
 let possessionCooldown = 0
 let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hacia este compañero
 let autoAdvance = true // los atacantes sin orden manual avanzan/retroceden siguiendo al balón
+let carryDistance = 0 // distancia recorrida por el portador activo sin pasar/lanzar ("pasos")
 
 // --- Equipo ---
 interface Teammate {
@@ -227,6 +241,7 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
   possession = 0
   passTargetIdx = null
   ballVelocity.set(0, 0, 0)
+  carryDistance = 0
 }
 
 function setActive(idx: number) {
@@ -337,6 +352,18 @@ function releaseBall() {
   possessionCooldown = 0.35
 }
 
+// Regla de pasos simplificada: si corres más de MAX_CARRY_DISTANCE con el
+// balón sin pasar ni lanzar, lo pierdes (se te cae, queda suelto).
+function forceTurnover() {
+  lastHolder = activeIndex
+  possession = -1
+  possessionCooldown = 0.35
+  carryDistance = 0
+  ballVelocity.set((Math.random() - 0.5) * 1.5, 1.2, (Math.random() - 0.5) * 1.5)
+  messageEl.textContent = '¡Pasos! Pierdes el balón.'
+  playTurnover()
+}
+
 function shootAt(groundPoint: THREE.Vector3) {
   if (possession !== activeIndex) return
   const target = new THREE.Vector3(
@@ -353,6 +380,7 @@ function shootAt(groundPoint: THREE.Vector3) {
   ballVelocity.y = SHOOT_ARC
   releaseBall()
   messageEl.textContent = '¡Lanzamiento!'
+  playShoot()
 }
 
 function shoot() {
@@ -364,6 +392,7 @@ function passTo(bestIdx: number) {
   passTargetIdx = bestIdx
   releaseBall()
   messageEl.textContent = `Pase al jugador ${bestIdx + 1}`
+  playPass()
 }
 
 function pass() {
@@ -392,6 +421,7 @@ function resetBall() {
   ballVelocity.set(0, 0, 0)
   passTargetIdx = null
   possession = 0
+  carryDistance = 0
 }
 
 function updateActivePlayer(dt: number) {
@@ -409,6 +439,11 @@ function updateActivePlayer(dt: number) {
     active.group.position.z = THREE.MathUtils.clamp(active.group.position.z, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
     active.facing = move.clone()
     active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
+
+    if (possession === activeIndex) {
+      carryDistance += PLAYER_SPEED * dt
+      if (carryDistance > MAX_CARRY_DISTANCE) forceTurnover()
+    }
   }
 }
 
@@ -461,6 +496,7 @@ function updateBallPass(dt: number) {
     passTargetIdx = null
     ballVelocity.set((Math.random() - 0.5) * 4, 3, (Math.random() - 0.5) * 6)
     messageEl.textContent = '¡Pase interceptado por el portero!'
+    playWhistle()
     return
   }
 
@@ -469,6 +505,7 @@ function updateBallPass(dt: number) {
       passTargetIdx = null
       ballVelocity.set((Math.random() - 0.5) * 4, 2, (Math.random() - 0.5) * 6)
       messageEl.textContent = '¡Pase interceptado por el defensor!'
+      playWhistle()
       return
     }
   }
@@ -477,6 +514,8 @@ function updateBallPass(dt: number) {
     possession = idx
     passTargetIdx = null
     ballVelocity.set(0, 0, 0)
+    carryDistance = 0
+    playCatch()
     if (idx !== activeIndex) setActive(idx)
     return
   }
@@ -513,6 +552,8 @@ function updateBallFree(dt: number) {
     score += 1
     scoreEl.textContent = `Goles: ${score}`
     messageEl.textContent = '¡GOL! 🤾'
+    playGoal()
+    triggerGoalFlash()
     resetBall()
     return
   }
@@ -522,6 +563,7 @@ function updateBallFree(dt: number) {
     ballVelocity.x *= -0.5
     ballVelocity.z += (Math.random() - 0.5) * 4
     messageEl.textContent = '¡Parada del portero!'
+    playWhistle()
   }
 
   for (const defender of defenders) {
@@ -531,6 +573,7 @@ function updateBallFree(dt: number) {
       ballVelocity.z += (Math.random() - 0.5) * 5
       ballVelocity.y = Math.max(ballVelocity.y, 1.5)
       messageEl.textContent = '¡Balón interceptado por el defensor!'
+      playWhistle()
       break
     }
   }
@@ -541,6 +584,8 @@ function updateBallFree(dt: number) {
     if (d < CATCH_RADIUS && ball.position.y < 1.3) {
       possession = idx
       ballVelocity.set(0, 0, 0)
+      carryDistance = 0
+      playCatch()
       if (idx !== activeIndex) setActive(idx)
       return
     }
@@ -592,11 +637,21 @@ function updateDefenders(dt: number) {
   }
 }
 
+const carryColorGreen = new THREE.Color(0x22ff88)
+const carryColorRed = new THREE.Color(0xff2222)
+
 function updateRings() {
   teammates.forEach((t, idx) => {
     if (idx === activeIndex) {
       t.ring.visible = true
-      ;(t.ring.material as THREE.MeshBasicMaterial).color.setHex(0x22ff88)
+      const ringMat = t.ring.material as THREE.MeshBasicMaterial
+      if (possession === activeIndex) {
+        // "Pasos": el anillo pasa de verde a rojo según se agota el margen para correr.
+        const t01 = THREE.MathUtils.clamp(carryDistance / MAX_CARRY_DISTANCE, 0, 1)
+        ringMat.color.copy(carryColorGreen).lerp(carryColorRed, t01)
+      } else {
+        ringMat.color.setHex(0x22ff88)
+      }
     } else if (idx === tacticalSelected) {
       t.ring.visible = true
       ;(t.ring.material as THREE.MeshBasicMaterial).color.setHex(0xffdd33)
