@@ -24,6 +24,9 @@ const DEFENDER_MIN_FROM_GOAL = 6.5 // no invaden el área de 6m
 const DEFENDER_MAX_FROM_GOAL = 18
 const DEFENDER_INTERCEPT_RADIUS = 0.85
 
+const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por detrás, en apoyo
+const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
+
 const ATTACKER_COLOR = 0x1f5fff
 const DEFENDER_COLOR = 0xe02020
 const KEEPER_COLOR = 0xffcc00
@@ -79,6 +82,7 @@ let possession = 0 // índice del compañero que tiene el balón, -1 si está su
 let lastHolder = -1
 let possessionCooldown = 0
 let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hacia este compañero
+let autoAdvance = true // los atacantes sin orden manual avanzan/retroceden siguiendo al balón
 
 // --- Equipo ---
 interface Teammate {
@@ -148,23 +152,20 @@ let activeIndex = 0
 let tacticalSelected: number | null = null
 
 async function buildTeams(attackerCount: number, defenderCount: number) {
-  // Se carga todo en arrays temporales primero (los del equipo en juego no se
-  // tocan mientras tanto, así el frame en curso sigue viendo el equipo anterior
-  // completo) y solo al final se sustituye todo de golpe, sin ningún `await`
-  // de por medio, para no dejar el equipo a medias en ningún frame renderizado.
-  const newTeammates: Teammate[] = []
-  const newHitboxes: THREE.Mesh[] = []
-  const newIcons: HTMLDivElement[] = []
-
+  // Se carga todo en paralelo en arrays temporales primero (los del equipo en
+  // juego no se tocan mientras tanto, así el frame en curso sigue viendo el
+  // equipo anterior completo) y solo al final se sustituye todo de golpe, sin
+  // ningún `await` de por medio, para no dejar el equipo a medias en ningún
+  // frame renderizado.
   const attackerZ = layoutZ(attackerCount, 8)
-  for (let i = 0; i < attackerCount; i++) {
+  const attackerLoads = Array.from({ length: attackerCount }, async (_, i) => {
     const group = await loadCharacter('/models/player.glb', ATTACKER_COLOR)
     const startPos = new THREE.Vector3(-10 - (i % 2) * 3, 0, attackerZ[i])
     group.position.copy(startPos)
     group.add(createTeamDisc(ATTACKER_COLOR))
     const ring = createRing(0x22ff88)
     group.add(ring)
-    newTeammates.push({ group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null, startPos })
+    const teammate: Teammate = { group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null, startPos }
 
     const box = new THREE.Mesh(
       new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
@@ -173,25 +174,30 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
     box.position.y = 1.1
     box.userData.idx = i
     group.add(box)
-    newHitboxes.push(box)
 
     const icon = document.createElement('div')
     icon.className = 'pass-icon'
     icon.textContent = String(i + 1)
     icon.addEventListener('click', () => choosePlayer(i))
-    newIcons.push(icon)
-  }
 
-  const newDefenders: Defender[] = []
+    return { teammate, box, icon }
+  })
+
   const defenderZ = layoutZ(defenderCount, 8)
-  for (let i = 0; i < defenderCount; i++) {
+  const defenderLoads = Array.from({ length: defenderCount }, async (_, i) => {
     const group = await loadCharacter('/models/keeper.glb', DEFENDER_COLOR)
     const startPos = new THREE.Vector3(12 + (i % 2) * 3, 0, defenderZ[i])
     group.position.copy(startPos)
     group.rotation.y = -Math.PI / 2
     group.add(createTeamDisc(DEFENDER_COLOR))
-    newDefenders.push({ group, marks: i % attackerCount, startPos })
-  }
+    const defender: Defender = { group, marks: i % attackerCount, startPos }
+    return defender
+  })
+
+  const [attackerResults, newDefenders] = await Promise.all([Promise.all(attackerLoads), Promise.all(defenderLoads)])
+  const newTeammates = attackerResults.map((r) => r.teammate)
+  const newHitboxes = attackerResults.map((r) => r.box)
+  const newIcons = attackerResults.map((r) => r.icon)
 
   // --- swap atómico ---
   teammates.forEach((t) => {
@@ -407,13 +413,27 @@ function updateActivePlayer(dt: number) {
 }
 
 function updateTeammateAI(t: Teammate, dt: number) {
-  if (!t.target) return
+  let targetX: number
+  let targetZ: number
+
+  if (t.target) {
+    targetX = t.target.x
+    targetZ = t.target.z
+  } else if (autoAdvance) {
+    // Sin orden manual: se mantienen en su carril (startPos.z) pero avanzan o
+    // retroceden en profundidad siguiendo el progreso del balón por el campo.
+    targetX = THREE.MathUtils.clamp(ball.position.x + AUTO_SUPPORT_OFFSET_X, -FIELD_X_LIMIT, FIELD_X_LIMIT)
+    targetZ = THREE.MathUtils.lerp(t.startPos.z, ball.position.z, AUTO_SUPPORT_LERP)
+  } else {
+    return
+  }
+
   const pos = t.group.position
-  const dx = t.target.x - pos.x
-  const dz = t.target.z - pos.z
+  const dx = targetX - pos.x
+  const dz = targetZ - pos.z
   const dist = Math.hypot(dx, dz)
   if (dist < 0.15) {
-    t.marker.visible = false
+    if (t.target) t.marker.visible = false
     return
   }
   const dir = new THREE.Vector3(dx / dist, 0, dz / dist)
@@ -644,11 +664,27 @@ document.getElementById('def-plus')!.addEventListener('click', () => {
   pendingDefenders = Math.min(MAX_ROSTER, pendingDefenders + 1)
   defCountEl.textContent = String(pendingDefenders)
 })
-document.getElementById('roster-apply')!.addEventListener('click', () => {
-  buildTeams(pendingAttackers, pendingDefenders)
-  scoreEl.textContent = 'Goles: 0'
-  score = 0
-  messageEl.textContent = `Equipos: ${pendingAttackers} atacantes vs ${pendingDefenders} defensores`
+document.getElementById('auto-advance')!.addEventListener('change', (e) => {
+  autoAdvance = (e.target as HTMLInputElement).checked
+})
+
+const rosterApplyBtn = document.getElementById('roster-apply') as HTMLButtonElement
+rosterApplyBtn.addEventListener('click', async () => {
+  rosterApplyBtn.disabled = true
+  rosterApplyBtn.textContent = 'Cargando...'
+  messageEl.textContent = 'Cargando plantilla nueva...'
+  try {
+    await buildTeams(pendingAttackers, pendingDefenders)
+    scoreEl.textContent = 'Goles: 0'
+    score = 0
+    messageEl.textContent = `Equipos: ${pendingAttackers} atacantes vs ${pendingDefenders} defensores`
+  } catch (err) {
+    console.error('Error al reconstruir los equipos:', err)
+    messageEl.textContent = 'Error al aplicar el cambio de plantilla (revisa la consola).'
+  } finally {
+    rosterApplyBtn.disabled = false
+    rosterApplyBtn.textContent = 'Aplicar y reiniciar'
+  }
 })
 
 const clock = new THREE.Clock()
