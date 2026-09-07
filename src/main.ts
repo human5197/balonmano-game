@@ -103,8 +103,8 @@ scene.add(sun)
 
 // --- Campo y porterías ---
 scene.add(buildCourt())
-scene.add(buildGoal(GOAL_LINE_X, -1))
-scene.add(buildGoal(-GOAL_LINE_X, 1))
+scene.add(buildGoal(GOAL_LINE_X, 1))
+scene.add(buildGoal(-GOAL_LINE_X, -1))
 
 // --- Balón ---
 const ball = new THREE.Mesh(
