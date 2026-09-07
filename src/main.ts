@@ -39,6 +39,9 @@ const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por 
 const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
 
 const MAX_CARRY_DISTANCE = 3 // "3 pasos" simplificados: metros que puedes correr con el balón sin botar/pasar
+const DRIBBLE_MIN_Y = 0.15
+const DRIBBLE_MAX_Y = 0.95
+const DRIBBLE_BOUNCE_SPEED = 6
 
 const ATTACKER_COLOR = 0x1f5fff
 const DEFENDER_COLOR = 0xe02020
@@ -97,6 +100,8 @@ let possessionCooldown = 0
 let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hacia este compañero
 let autoAdvance = true // los atacantes sin orden manual avanzan/retroceden siguiendo al balón
 let carryDistance = 0 // distancia recorrida por el portador activo sin pasar/lanzar ("pasos")
+let isDribbling = false // mantén Shift para botar: no cuenta como pasos y puedes seguir corriendo
+let elapsedTime = 0
 
 // --- Equipo ---
 interface Teammate {
@@ -426,6 +431,12 @@ function resetBall() {
 
 function updateActivePlayer(dt: number) {
   const active = teammates[activeIndex]
+
+  // Mantén Shift para botar: mientras botas no consumes "pasos" y puedes
+  // seguir corriendo indefinidamente, igual que en balonmano real.
+  isDribbling = possession === activeIndex && (keys.has('shift') || keys.has('shiftleft') || keys.has('shiftright'))
+  if (isDribbling) carryDistance = 0
+
   const move = new THREE.Vector3()
   if (keys.has('w') || keys.has('arrowup')) move.x += 1
   if (keys.has('s') || keys.has('arrowdown')) move.x -= 1
@@ -440,7 +451,7 @@ function updateActivePlayer(dt: number) {
     active.facing = move.clone()
     active.group.rotation.y = Math.atan2(active.facing.x, active.facing.z) + Math.PI / 2
 
-    if (possession === activeIndex) {
+    if (possession === activeIndex && !isDribbling) {
       carryDistance += PLAYER_SPEED * dt
       if (carryDistance > MAX_CARRY_DISTANCE) forceTurnover()
     }
@@ -480,7 +491,11 @@ function updateTeammateAI(t: Teammate, dt: number) {
 function updateBallHeld() {
   const holder = teammates[possession]
   const holdOffset = holder.facing.clone().multiplyScalar(0.55)
-  ball.position.set(holder.group.position.x + holdOffset.x, 0.95, holder.group.position.z + holdOffset.z)
+  const y =
+    isDribbling && possession === activeIndex
+      ? THREE.MathUtils.lerp(DRIBBLE_MIN_Y, DRIBBLE_MAX_Y, Math.abs(Math.sin(elapsedTime * DRIBBLE_BOUNCE_SPEED)))
+      : PASS_HEIGHT
+  ball.position.set(holder.group.position.x + holdOffset.x, y, holder.group.position.z + holdOffset.z)
 }
 
 function updateBallPass(dt: number) {
@@ -745,6 +760,7 @@ rosterApplyBtn.addEventListener('click', async () => {
 const clock = new THREE.Clock()
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05)
+  elapsedTime += dt
 
   updateActivePlayer(dt)
   teammates.forEach((t, idx) => {
