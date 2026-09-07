@@ -12,8 +12,9 @@ const BALL_RADIUS = 0.1
 const GRAVITY = -9.8
 const KEEPER_SPEED = 4.5
 const SHOOT_ARC = 3.2
-const PASS_SPEED = 9
-const CATCH_RADIUS = 0.9
+const PASS_SPEED = 11
+const PASS_HEIGHT = 0.95
+const CATCH_RADIUS = 1.1
 const FIELD_X_LIMIT = 19
 const FIELD_Z_LIMIT = 9.5
 
@@ -65,6 +66,7 @@ let ballVelocity = new THREE.Vector3()
 let possession = 0 // índice del compañero que tiene el balón, -1 si está suelto
 let lastHolder = -1
 let possessionCooldown = 0
+let passTargetIdx: number | null = null // si hay pase en curso, va "homing" hacia este compañero
 
 // --- Equipo ---
 interface Teammate {
@@ -172,15 +174,17 @@ function pointerNdc(event: MouseEvent): THREE.Vector2 {
   )
 }
 
-// Click izquierdo: con balón, decide a quién pasar (click en un compañero)
-// o a dónde lanzar (click en el campo/portería).
+// Click izquierdo: si tienes el balón, elige a quién pasar; si no, cambia
+// el control directamente al jugador clicado (forma rápida de cambiar de jugador).
 renderer.domElement.addEventListener('click', (event) => {
   raycaster.setFromCamera(pointerNdc(event), camera)
 
   const hit = raycaster.intersectObjects(hitboxes, false)[0]
   if (hit) {
     const idx = hit.object.userData.idx as number
-    if (idx !== activeIndex) passTo(idx)
+    if (idx === activeIndex) return
+    if (possession === activeIndex) passTo(idx)
+    else setActive(idx)
     return
   }
 
@@ -249,12 +253,7 @@ function shoot() {
 
 function passTo(bestIdx: number) {
   if (possession !== activeIndex || bestIdx === activeIndex) return
-  const targetPos = teammates[bestIdx].group.position
-  const flat = new THREE.Vector2(targetPos.x - ball.position.x, targetPos.z - ball.position.z)
-  const dist = flat.length()
-  const dir = new THREE.Vector3(flat.x / dist, 0, flat.y / dist)
-  ballVelocity = dir.multiplyScalar(PASS_SPEED)
-  ballVelocity.y = 2.4
+  passTargetIdx = bestIdx
   releaseBall()
   messageEl.textContent = `Pase al jugador ${bestIdx + 1}`
 }
@@ -282,6 +281,7 @@ function resetBall() {
   })
   setActive(0)
   ballVelocity.set(0, 0, 0)
+  passTargetIdx = null
   possession = 0
 }
 
@@ -325,8 +325,42 @@ function updateBallHeld() {
   ball.position.set(holder.group.position.x + holdOffset.x, 0.95, holder.group.position.z + holdOffset.z)
 }
 
+function updateBallPass(dt: number) {
+  const idx = passTargetIdx!
+  const targetPos = teammates[idx].group.position
+  const dx = targetPos.x - ball.position.x
+  const dz = targetPos.z - ball.position.z
+  const dist = Math.hypot(dx, dz)
+  ball.position.y = THREE.MathUtils.lerp(ball.position.y, PASS_HEIGHT, Math.min(1, dt * 10))
+
+  const dKeeper = ball.position.distanceTo(keeper.position.clone().setY(ball.position.y))
+  if (dKeeper < 0.8) {
+    passTargetIdx = null
+    ballVelocity.set((Math.random() - 0.5) * 4, 3, (Math.random() - 0.5) * 6)
+    messageEl.textContent = '¡Pase interceptado por el portero!'
+    return
+  }
+
+  if (dist < CATCH_RADIUS) {
+    possession = idx
+    passTargetIdx = null
+    ballVelocity.set(0, 0, 0)
+    if (idx !== activeIndex) setActive(idx)
+    return
+  }
+
+  const step = Math.min(PASS_SPEED * dt, dist)
+  ball.position.x += (dx / dist) * step
+  ball.position.z += (dz / dist) * step
+}
+
 function updateBallFree(dt: number) {
   possessionCooldown = Math.max(0, possessionCooldown - dt)
+
+  if (passTargetIdx !== null) {
+    updateBallPass(dt)
+    return
+  }
 
   ballVelocity.y += GRAVITY * dt
   ball.position.addScaledVector(ballVelocity, dt)

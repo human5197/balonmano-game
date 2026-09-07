@@ -64,43 +64,101 @@ export function buildCourt(): THREE.Group {
   return group
 }
 
+function edgeBar(a: THREE.Vector3, b: THREE.Vector3, radius: number, material: THREE.Material): THREE.Mesh {
+  const dir = new THREE.Vector3().subVectors(b, a)
+  const length = dir.length()
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, length, 10), material)
+  bar.position.copy(a).addScaledVector(dir, 0.5)
+  bar.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize())
+  bar.castShadow = true
+  return bar
+}
+
+let netTexture: THREE.Texture | null = null
+function getNetTexture(): THREE.Texture {
+  if (netTexture) return netTexture
+  const size = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')!
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(0, 0)
+  ctx.lineTo(size, size)
+  ctx.moveTo(size, 0)
+  ctx.lineTo(0, size)
+  ctx.stroke()
+  netTexture = new THREE.CanvasTexture(canvas)
+  netTexture.wrapS = THREE.RepeatWrapping
+  netTexture.wrapT = THREE.RepeatWrapping
+  return netTexture
+}
+
+function netPanel(width: number, height: number): THREE.Mesh {
+  const texture = getNetTexture().clone()
+  texture.needsUpdate = true
+  texture.repeat.set(width / 0.22, height / 0.22)
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  })
+  return new THREE.Mesh(new THREE.PlaneGeometry(width, height), material)
+}
+
 export function buildGoal(x: number, facing: 1 | -1): THREE.Group {
   const group = new THREE.Group()
-  const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 })
-  const postRadius = 0.06
+  const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.1 })
+  const postRadius = 0.055
+  const depth = 1 // profundidad real de una portería de balonmano (~1m)
+  const w = GOAL_HALF_WIDTH
+  const H = GOAL_HEIGHT
+  const backX = x + facing * depth
 
-  const leftPost = new THREE.Mesh(new THREE.CylinderGeometry(postRadius, postRadius, GOAL_HEIGHT, 12), postMat)
-  leftPost.position.set(x, GOAL_HEIGHT / 2, -GOAL_HALF_WIDTH)
-  leftPost.castShadow = true
-  group.add(leftPost)
+  const frontTopLeft = new THREE.Vector3(x, H, -w)
+  const frontTopRight = new THREE.Vector3(x, H, w)
+  const frontBotLeft = new THREE.Vector3(x, 0, -w)
+  const frontBotRight = new THREE.Vector3(x, 0, w)
+  const backTopLeft = new THREE.Vector3(backX, H, -w)
+  const backTopRight = new THREE.Vector3(backX, H, w)
+  const backBotLeft = new THREE.Vector3(backX, 0, -w)
+  const backBotRight = new THREE.Vector3(backX, 0, w)
 
-  const rightPost = leftPost.clone()
-  rightPost.position.z = GOAL_HALF_WIDTH
-  group.add(rightPost)
+  const edges: [THREE.Vector3, THREE.Vector3][] = [
+    [frontBotLeft, frontTopLeft], // poste frontal izq.
+    [frontBotRight, frontTopRight], // poste frontal der.
+    [frontTopLeft, frontTopRight], // larguero
+    [backBotLeft, backTopLeft], // poste trasero izq.
+    [backBotRight, backTopRight], // poste trasero der.
+    [backTopLeft, backTopRight], // barra trasera superior
+    [frontTopLeft, backTopLeft], // lateral superior izq.
+    [frontTopRight, backTopRight], // lateral superior der.
+    [frontBotLeft, backBotLeft], // lateral inferior izq. (a ras de suelo)
+    [frontBotRight, backBotRight], // lateral inferior der. (a ras de suelo)
+  ]
+  for (const [a, b] of edges) group.add(edgeBar(a, b, postRadius, postMat))
 
-  const crossbar = new THREE.Mesh(new THREE.CylinderGeometry(postRadius, postRadius, GOAL_HALF_WIDTH * 2, 12), postMat)
-  crossbar.rotation.z = Math.PI / 2
-  crossbar.position.set(x, GOAL_HEIGHT, 0)
-  crossbar.castShadow = true
-  group.add(crossbar)
+  const back = netPanel(w * 2, H)
+  back.position.set(backX, H / 2, 0)
+  back.rotation.y = Math.PI / 2
+  group.add(back)
 
-  const netMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    wireframe: true,
-    transparent: true,
-    opacity: 0.5,
-    side: THREE.DoubleSide,
-  })
-  const backNet = new THREE.Mesh(new THREE.PlaneGeometry(GOAL_HALF_WIDTH * 2, GOAL_HEIGHT, 10, 8), netMat)
-  backNet.position.set(x + facing * 0.7, GOAL_HEIGHT / 2, 0)
-  backNet.rotation.y = Math.PI / 2
-  group.add(backNet)
+  const top = netPanel(depth, w * 2)
+  top.position.set(x + (facing * depth) / 2, H - 0.01, 0)
+  top.rotation.x = -Math.PI / 2
+  group.add(top)
 
-  const topNet = new THREE.Mesh(new THREE.PlaneGeometry(GOAL_HALF_WIDTH * 2, 0.7, 10, 4), netMat)
-  topNet.position.set(x + (facing * 0.7) / 2, GOAL_HEIGHT - 0.02, 0)
-  topNet.rotation.x = Math.PI / 2
-  topNet.rotation.z = Math.PI / 2
-  group.add(topNet)
+  const left = netPanel(depth, H)
+  left.position.set(x + (facing * depth) / 2, H / 2, -w)
+  group.add(left)
+
+  const right = left.clone()
+  right.material = (left.material as THREE.MeshBasicMaterial).clone()
+  right.position.z = w
+  group.add(right)
 
   return group
 }
