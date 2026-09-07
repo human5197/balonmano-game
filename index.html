@@ -3,14 +3,36 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Balonmano Game</title>
+    <title>Balonmano 3D</title>
     <style>
-      html, body { margin: 0; padding: 0; background: #0d1117; display: flex; align-items: center; justify-content: center; height: 100vh; }
-      #app { line-height: 0; }
+      html, body { margin: 0; padding: 0; overflow: hidden; background: #0d1117; height: 100%; }
+      #app { position: relative; width: 100vw; height: 100vh; }
+      canvas { display: block; }
+      #hud {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        padding: 16px;
+        box-sizing: border-box;
+        color: #ffffff;
+        font-family: system-ui, sans-serif;
+        pointer-events: none;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+      }
+      #hud .score { font-size: 24px; font-weight: 700; }
+      #hud .hint { font-size: 14px; opacity: 0.85; margin-top: 4px; }
+      #hud .message { font-size: 18px; margin-top: 8px; min-height: 22px; }
     </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div id="hud">
+        <div class="score" id="score">Goles: 0</div>
+        <div class="hint">WASD / flechas: mover · Espacio o Click: lanzar</div>
+        <div class="message" id="message"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
