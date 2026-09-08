@@ -61,7 +61,7 @@ const CHARGE_MIN_POWER = 0.35
 const AIM_SPEED = 4.5
 const AIM_RANGE = GOAL_HALF_WIDTH * 1.6
 
-const AUTO_SUPPORT_OFFSET_X = -3 // los atacantes sin balón se quedan algo por detrás, en apoyo
+const AUTO_SUPPORT_OFFSET_MAG = 3 // los atacantes sin balón se quedan algo por detrás, en apoyo
 const AUTO_SUPPORT_LERP = 0.35 // cuánto tiran hacia el balón en profundidad, sin perder del todo su carril
 
 const MAX_CARRY_DISTANCE = 3 // "3 pasos" simplificados: metros que puedes correr con el balón sin botar/pasar
@@ -148,25 +148,22 @@ let chargeStart = 0
 let aimZ = 0
 
 // --- Equipo ---
-interface Teammate {
+// Un único tipo para los dos equipos: cualquiera puede acabar atacando o
+// defendiendo según quién tenga el balón, así que ambos necesitan la misma
+// capacidad (control, pase, marcaje...).
+interface Player {
   group: THREE.Group
   ring: THREE.Mesh
   marker: THREE.Mesh
+  hitbox: THREE.Mesh
+  icon: HTMLDivElement
   facing: THREE.Vector3
   target: THREE.Vector3 | null
   startPos: THREE.Vector3
   velocity: THREE.Vector3 // movimiento con inercia, no un salto directo al objetivo
   speedFactor: number // cada jugador corre un poco más rápido o más lento que los demás
   weavePhase: number // para que la trayectoria ondule un poco, no sea una línea perfecta
-}
-
-interface Defender {
-  group: THREE.Group
-  marks: number // índice del compañero al que marca
-  startPos: THREE.Vector3
-  velocity: THREE.Vector3
-  speedFactor: number
-  weavePhase: number
+  marks: number // índice, dentro del equipo atacante, del jugador que marca (solo cuando defiende)
 }
 
 function createRing(color: number): THREE.Mesh {
@@ -228,101 +225,99 @@ function keepOutOfGoalArea(pos: THREE.Vector3) {
 }
 
 const passIconsEl = document.getElementById('pass-icons')!
-const passIcons: HTMLDivElement[] = []
-const teammates: Teammate[] = []
-const defenders: Defender[] = []
-const hitboxes: THREE.Mesh[] = []
+
+// Dos escuadras fijas (azul y roja); `teammates`/`defenders` son punteros a
+// "quién ataca ahora" y "quién defiende ahora" — un cambio de posesión no
+// mueve jugadores entre arrays, solo intercambia a qué escuadra apunta cada
+// variable, así que cada jugador conserva su color/identidad para siempre.
+let squadBlue: Player[] = []
+let squadRed: Player[] = []
+let teammates: Player[] = squadBlue
+let defenders: Player[] = squadRed
+let attackGoalX = GOAL_LINE_X // hacia qué portería ataca `teammates` ahora mismo
 
 let activeIndex = 0
 let tacticalSelected: number | null = null
 
+async function createPlayer(modelUrl: string, color: number, startPos: THREE.Vector3, index: number): Promise<Player> {
+  const group = await loadCharacter(modelUrl, color)
+  group.position.copy(startPos)
+  group.add(createTeamDisc(color))
+  const ring = createRing(0x22ff88)
+  group.add(ring)
+
+  const hitbox = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
+  )
+  hitbox.position.y = 1.1
+  hitbox.userData.idx = index
+  group.add(hitbox)
+
+  const icon = document.createElement('div')
+  icon.className = 'pass-icon'
+  icon.textContent = String(index + 1)
+  icon.addEventListener('click', () => choosePlayer(index))
+
+  return {
+    group,
+    ring,
+    marker: createMarker(),
+    hitbox,
+    icon,
+    facing: new THREE.Vector3(1, 0, 0),
+    target: null,
+    startPos,
+    velocity: new THREE.Vector3(),
+    speedFactor: 0.85 + Math.random() * 0.3,
+    weavePhase: Math.random() * Math.PI * 2,
+    marks: 0,
+  }
+}
+
 async function buildTeams(attackerCount: number, defenderCount: number) {
-  // Se carga todo en paralelo en arrays temporales primero (los del equipo en
-  // juego no se tocan mientras tanto, así el frame en curso sigue viendo el
-  // equipo anterior completo) y solo al final se sustituye todo de golpe, sin
-  // ningún `await` de por medio, para no dejar el equipo a medias en ningún
-  // frame renderizado.
-  const attackerZ = layoutZ(attackerCount, 8)
-  const attackerLoads = Array.from({ length: attackerCount }, async (_, i) => {
-    const group = await loadCharacter('/models/player.glb', ATTACKER_COLOR)
-    const startPos = new THREE.Vector3(-10 - (i % 2) * 3, 0, attackerZ[i])
-    group.position.copy(startPos)
-    group.add(createTeamDisc(ATTACKER_COLOR))
-    const ring = createRing(0x22ff88)
-    group.add(ring)
-    const teammate: Teammate = {
-      group,
-      ring,
-      marker: createMarker(),
-      facing: new THREE.Vector3(1, 0, 0),
-      target: null,
-      startPos,
-      velocity: new THREE.Vector3(),
-      speedFactor: 0.85 + Math.random() * 0.3,
-      weavePhase: Math.random() * Math.PI * 2,
-    }
-
-    const box = new THREE.Mesh(
-      new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
-      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
-    )
-    box.position.y = 1.1
-    box.userData.idx = i
-    group.add(box)
-
-    const icon = document.createElement('div')
-    icon.className = 'pass-icon'
-    icon.textContent = String(i + 1)
-    icon.addEventListener('click', () => choosePlayer(i))
-
-    return { teammate, box, icon }
+  // Se carga todo en paralelo primero (los equipos en juego no se tocan
+  // mientras tanto, así el frame en curso sigue viendo el equipo anterior
+  // completo) y solo al final se sustituye todo de golpe, sin ningún `await`
+  // de por medio, para no dejar el equipo a medias en ningún frame renderizado.
+  const blueZ = layoutZ(attackerCount, 8)
+  const redZ = layoutZ(defenderCount, 8)
+  const [bluePlayers, redPlayers] = await Promise.all([
+    Promise.all(
+      Array.from({ length: attackerCount }, (_, i) =>
+        createPlayer('/models/player.glb', ATTACKER_COLOR, new THREE.Vector3(-10 - (i % 2) * 3, 0, blueZ[i]), i),
+      ),
+    ),
+    Promise.all(
+      Array.from({ length: defenderCount }, (_, i) =>
+        createPlayer('/models/keeper.glb', DEFENDER_COLOR, new THREE.Vector3(12 + (i % 2) * 3, 0, redZ[i]), i),
+      ),
+    ),
+  ])
+  redPlayers.forEach((p, i) => {
+    p.group.rotation.y = -Math.PI / 2
+    p.marks = i % attackerCount
   })
-
-  const defenderZ = layoutZ(defenderCount, 8)
-  const defenderLoads = Array.from({ length: defenderCount }, async (_, i) => {
-    const group = await loadCharacter('/models/keeper.glb', DEFENDER_COLOR)
-    const startPos = new THREE.Vector3(12 + (i % 2) * 3, 0, defenderZ[i])
-    group.position.copy(startPos)
-    group.rotation.y = -Math.PI / 2
-    group.add(createTeamDisc(DEFENDER_COLOR))
-    const defender: Defender = {
-      group,
-      marks: i % attackerCount,
-      startPos,
-      velocity: new THREE.Vector3(),
-      speedFactor: 0.85 + Math.random() * 0.3,
-      weavePhase: Math.random() * Math.PI * 2,
-    }
-    return defender
-  })
-
-  const [attackerResults, newDefenders] = await Promise.all([Promise.all(attackerLoads), Promise.all(defenderLoads)])
-  const newTeammates = attackerResults.map((r) => r.teammate)
-  const newHitboxes = attackerResults.map((r) => r.box)
-  const newIcons = attackerResults.map((r) => r.icon)
 
   // --- swap atómico ---
-  teammates.forEach((t) => {
-    scene.remove(t.group)
-    scene.remove(t.marker)
-  })
-  defenders.forEach((d) => scene.remove(d.group))
-
-  teammates.length = 0
-  teammates.push(...newTeammates)
-  defenders.length = 0
-  defenders.push(...newDefenders)
-  hitboxes.length = 0
-  hitboxes.push(...newHitboxes)
-  passIconsEl.innerHTML = ''
-  passIcons.length = 0
-  newIcons.forEach((icon) => {
-    passIconsEl.appendChild(icon)
-    passIcons.push(icon)
+  ;[...squadBlue, ...squadRed].forEach((p) => {
+    scene.remove(p.group)
+    scene.remove(p.marker)
+    p.icon.remove()
   })
 
-  newTeammates.forEach((t) => scene.add(t.group))
-  newDefenders.forEach((d) => scene.add(d.group))
+  squadBlue = bluePlayers
+  squadRed = redPlayers
+  teammates = squadBlue
+  defenders = squadRed
+  attackGoalX = GOAL_LINE_X
+  keeper.position.set(attackGoalX - 0.8, 0, 0)
+  keeper.rotation.y = -Math.PI / 2
+
+  for (const p of [...squadBlue, ...squadRed]) {
+    scene.add(p.group)
+    passIconsEl.appendChild(p.icon)
+  }
 
   activeIndex = 0
   tacticalSelected = null
@@ -397,7 +392,10 @@ function pointerNdc(event: MouseEvent): THREE.Vector2 {
 renderer.domElement.addEventListener('click', (event) => {
   raycaster.setFromCamera(pointerNdc(event), camera)
 
-  const hit = raycaster.intersectObjects(hitboxes, false)[0]
+  const hit = raycaster.intersectObjects(
+    teammates.map((t) => t.hitbox),
+    false,
+  )[0]
   if (hit) {
     choosePlayer(hit.object.userData.idx as number)
     return
@@ -415,7 +413,10 @@ renderer.domElement.addEventListener('contextmenu', (event) => {
   event.preventDefault()
   raycaster.setFromCamera(pointerNdc(event), camera)
 
-  const hit = raycaster.intersectObjects(hitboxes, false)[0]
+  const hit = raycaster.intersectObjects(
+    teammates.map((t) => t.hitbox),
+    false,
+  )[0]
   if (hit) {
     const idx = hit.object.userData.idx as number
     if (idx !== activeIndex) {
@@ -483,6 +484,8 @@ function startCharging() {
   charging = true
   chargeStart = elapsedTime
   aimZ = THREE.MathUtils.clamp(ball.position.z, -AIM_RANGE, AIM_RANGE)
+  aimMarker.position.x = attackGoalX - Math.sign(attackGoalX) * 0.05
+  aimMarker.position.z = aimZ
   aimMarker.visible = true
   powerMeterEl.style.visibility = 'visible'
 }
@@ -498,7 +501,7 @@ function releaseCharge() {
   if (!charging) return
   const power = THREE.MathUtils.clamp((elapsedTime - chargeStart) / CHARGE_MAX_TIME, CHARGE_MIN_POWER, 1)
   cancelCharging()
-  shootAt(new THREE.Vector3(GOAL_LINE_X, 0, aimZ), power)
+  shootAt(new THREE.Vector3(attackGoalX, 0, aimZ), power)
 }
 
 // Mientras se carga: el jugador se planta (sin moverse) y A/D o las flechas
@@ -544,14 +547,21 @@ function pass() {
 }
 
 function resetBall() {
-  teammates.forEach((t) => {
-    t.group.position.copy(t.startPos)
+  // No usamos el startPos original de cada jugador: si ha habido un cambio de
+  // posesión antes de este gol, su equipo puede estar ahora atacando o
+  // defendiendo el lado contrario al que tenía al crearse. Recalculamos el
+  // saque según el rol y la dirección de ataque actuales.
+  const dir = Math.sign(attackGoalX)
+  const attackerZ = layoutZ(teammates.length, 8)
+  teammates.forEach((t, i) => {
+    t.group.position.set(-dir * (10 + (i % 2) * 3), 0, attackerZ[i])
     t.target = null
     t.marker.visible = false
     t.velocity.set(0, 0, 0)
   })
-  defenders.forEach((d) => {
-    d.group.position.copy(d.startPos)
+  const defenderZ = layoutZ(defenders.length, 8)
+  defenders.forEach((d, i) => {
+    d.group.position.set(dir * (12 + (i % 2) * 3), 0, defenderZ[i])
     d.velocity.set(0, 0, 0)
   })
   setActive(0)
@@ -582,6 +592,46 @@ function giveBallToNearestAttacker(atPoint: THREE.Vector3) {
   hasDribbled = false
   shotTargetZ = null
   if (nearestIdx !== activeIndex) setActive(nearestIdx)
+}
+
+// Cambio de posesión: quien recupera el balón (portero->defensor más cercano,
+// o directamente el defensor que llega a un balón suelto) pasa a controlar
+// el ataque hacia la portería contraria; el equipo rival pasa a defender.
+function swapRoles(recoverer: Player) {
+  ;[teammates, defenders] = [defenders, teammates]
+  attackGoalX = -attackGoalX
+  const dir = Math.sign(attackGoalX)
+  keeper.position.set(attackGoalX - dir * 0.8, 0, 0)
+  keeper.rotation.y = dir > 0 ? -Math.PI / 2 : Math.PI / 2
+
+  defenders.forEach((d, i) => {
+    d.marks = i % Math.max(1, teammates.length)
+  })
+
+  teammates.forEach((t) => {
+    t.target = null
+    t.marker.visible = false
+  })
+  defenders.forEach((d) => {
+    d.target = null
+    d.marker.visible = false
+  })
+  tacticalSelected = null
+  cancelCharging()
+
+  const idx = teammates.indexOf(recoverer)
+  activeIndex = idx >= 0 ? idx : 0
+  possession = activeIndex
+  lastHolder = -1
+  possessionCooldown = 0
+  carryDistance = 0
+  hasDribbled = false
+  isDribbling = false
+  shotTargetZ = null
+  ballVelocity.set(0, 0, 0)
+
+  messageEl.textContent = '¡Cambio de posesión! Ahora atacas tú.'
+  playWhistle()
 }
 
 function updateActivePlayer(dt: number) {
@@ -637,7 +687,7 @@ function updateActivePlayer(dt: number) {
   }
 }
 
-function updateTeammateAI(t: Teammate, dt: number) {
+function updateTeammateAI(t: Player, dt: number) {
   let targetX: number
   let targetZ: number
   let hasTarget = true
@@ -648,7 +698,9 @@ function updateTeammateAI(t: Teammate, dt: number) {
   } else if (autoAdvance) {
     // Sin orden manual: se mantienen en su carril (startPos.z) pero avanzan o
     // retroceden en profundidad siguiendo el progreso del balón por el campo.
-    targetX = THREE.MathUtils.clamp(ball.position.x + AUTO_SUPPORT_OFFSET_X, -FIELD_X_LIMIT, FIELD_X_LIMIT)
+    // "Detrás" depende de hacia qué portería se ataca ahora mismo.
+    const behind = -Math.sign(attackGoalX) * AUTO_SUPPORT_OFFSET_MAG
+    targetX = THREE.MathUtils.clamp(ball.position.x + behind, -FIELD_X_LIMIT, FIELD_X_LIMIT)
     targetZ = THREE.MathUtils.lerp(t.startPos.z, ball.position.z, AUTO_SUPPORT_LERP)
   } else {
     targetX = t.group.position.x
@@ -778,8 +830,9 @@ function updateBallFree(dt: number) {
     if (Math.abs(ballVelocity.y) < 0.5) ballVelocity.y = 0
   }
 
+  const attackDir = Math.sign(attackGoalX)
   const inGoalMouth =
-    ball.position.x > GOAL_LINE_X - 0.2 &&
+    attackDir * (ball.position.x - attackGoalX) > -0.2 &&
     Math.abs(ball.position.z) < GOAL_HALF_WIDTH &&
     ball.position.y < GOAL_HEIGHT
   if (inGoalMouth) {
@@ -795,12 +848,22 @@ function updateBallFree(dt: number) {
   }
 
   const dKeeper = ball.position.distanceTo(keeper.position.clone().setY(ball.position.y))
-  if (dKeeper < 0.9 && ball.position.x > GOAL_LINE_X - 4) {
-    ballVelocity.x *= -0.5
-    ballVelocity.z += (Math.random() - 0.5) * 4
-    messageEl.textContent = '¡Parada del portero!'
+  if (dKeeper < 0.9 && attackDir * (ball.position.x - attackGoalX) > -4) {
+    // El portero atrapa el tiro: turnover inmediato, como en balonmano real
+    // (contraataque). Se lo damos al defensor más cercano a él.
+    messageEl.textContent = '¡Parada del portero! Cambio de posesión.'
     playWhistle()
-    shotTargetZ = null
+    let nearest = defenders[0]
+    let nearestDist = Infinity
+    defenders.forEach((d) => {
+      const dd = d.group.position.distanceTo(keeper.position)
+      if (dd < nearestDist) {
+        nearestDist = dd
+        nearest = d
+      }
+    })
+    swapRoles(nearest)
+    return
   }
 
   // Solo se puede bloquear un tiro justo al soltarlo; pasado ese instante, o si
@@ -835,6 +898,16 @@ function updateBallFree(dt: number) {
     }
   }
 
+  // Si un defensor llega antes al balón suelto, se produce el cambio de
+  // posesión: pasa a controlar/atacar su equipo, hacia la portería contraria.
+  for (const defender of defenders) {
+    if (defender.group.position.distanceTo(ball.position) < CATCH_RADIUS && ball.position.y < 1.3) {
+      messageEl.textContent = '¡Recuperan el balón! Cambio de posesión.'
+      swapRoles(defender)
+      return
+    }
+  }
+
   const outOfBounds = ball.position.x < -20.5 || ball.position.x > 20.5 || Math.abs(ball.position.z) > 10.5
   if (outOfBounds) {
     messageEl.textContent = 'Balón fuera. Saque para el ataque.'
@@ -856,10 +929,10 @@ function updateKeeper(dt: number) {
   keeper.rotation.z = THREE.MathUtils.lerp(keeper.rotation.z, lean, 0.3)
 }
 
-const goalCenter = new THREE.Vector2(GOAL_LINE_X, 0)
-
 function updateDefenders(dt: number) {
+  const goalCenter = new THREE.Vector2(attackGoalX, 0) // hacia dónde ataca `teammates` ahora mismo
   for (const defender of defenders) {
+    if (!teammates[defender.marks]) continue
     const attacker = teammates[defender.marks].group.position
 
     // Se colocan entre su atacante marcado y la portería (marcaje "goal-side").
@@ -935,9 +1008,11 @@ function updateCamera(dt: number) {
 // Iconos "estilo FIFA" sobre los compañeros a los que puedes pasar ahora mismo.
 const projectVec = new THREE.Vector3()
 function updatePassIcons() {
+  defenders.forEach((d) => (d.icon.style.visibility = 'hidden'))
+
   const canPass = possession === activeIndex
   teammates.forEach((t, idx) => {
-    const icon = passIcons[idx]
+    const icon = t.icon
     if (idx === activeIndex || !canPass) {
       icon.style.visibility = 'hidden'
       return
