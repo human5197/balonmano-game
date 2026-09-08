@@ -155,12 +155,18 @@ interface Teammate {
   facing: THREE.Vector3
   target: THREE.Vector3 | null
   startPos: THREE.Vector3
+  velocity: THREE.Vector3 // movimiento con inercia, no un salto directo al objetivo
+  speedFactor: number // cada jugador corre un poco más rápido o más lento que los demás
+  weavePhase: number // para que la trayectoria ondule un poco, no sea una línea perfecta
 }
 
 interface Defender {
   group: THREE.Group
   marks: number // índice del compañero al que marca
   startPos: THREE.Vector3
+  velocity: THREE.Vector3
+  speedFactor: number
+  weavePhase: number
 }
 
 function createRing(color: number): THREE.Mesh {
@@ -244,7 +250,17 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
     group.add(createTeamDisc(ATTACKER_COLOR))
     const ring = createRing(0x22ff88)
     group.add(ring)
-    const teammate: Teammate = { group, ring, marker: createMarker(), facing: new THREE.Vector3(1, 0, 0), target: null, startPos }
+    const teammate: Teammate = {
+      group,
+      ring,
+      marker: createMarker(),
+      facing: new THREE.Vector3(1, 0, 0),
+      target: null,
+      startPos,
+      velocity: new THREE.Vector3(),
+      speedFactor: 0.85 + Math.random() * 0.3,
+      weavePhase: Math.random() * Math.PI * 2,
+    }
 
     const box = new THREE.Mesh(
       new THREE.CylinderGeometry(1.3, 1.3, 2.4, 12),
@@ -269,7 +285,14 @@ async function buildTeams(attackerCount: number, defenderCount: number) {
     group.position.copy(startPos)
     group.rotation.y = -Math.PI / 2
     group.add(createTeamDisc(DEFENDER_COLOR))
-    const defender: Defender = { group, marks: i % attackerCount, startPos }
+    const defender: Defender = {
+      group,
+      marks: i % attackerCount,
+      startPos,
+      velocity: new THREE.Vector3(),
+      speedFactor: 0.85 + Math.random() * 0.3,
+      weavePhase: Math.random() * Math.PI * 2,
+    }
     return defender
   })
 
@@ -525,8 +548,12 @@ function resetBall() {
     t.group.position.copy(t.startPos)
     t.target = null
     t.marker.visible = false
+    t.velocity.set(0, 0, 0)
   })
-  defenders.forEach((d) => d.group.position.copy(d.startPos))
+  defenders.forEach((d) => {
+    d.group.position.copy(d.startPos)
+    d.velocity.set(0, 0, 0)
+  })
   setActive(0)
   ballVelocity.set(0, 0, 0)
   passTargetIdx = null
@@ -613,6 +640,7 @@ function updateActivePlayer(dt: number) {
 function updateTeammateAI(t: Teammate, dt: number) {
   let targetX: number
   let targetZ: number
+  let hasTarget = true
 
   if (t.target) {
     targetX = t.target.x
@@ -623,22 +651,51 @@ function updateTeammateAI(t: Teammate, dt: number) {
     targetX = THREE.MathUtils.clamp(ball.position.x + AUTO_SUPPORT_OFFSET_X, -FIELD_X_LIMIT, FIELD_X_LIMIT)
     targetZ = THREE.MathUtils.lerp(t.startPos.z, ball.position.z, AUTO_SUPPORT_LERP)
   } else {
-    return
+    targetX = t.group.position.x
+    targetZ = t.group.position.z
+    hasTarget = false
   }
 
-  const pos = t.group.position
+  // Pequeño balanceo lateral: no corren en línea perfectamente recta hacia el
+  // objetivo, como haría un jugador real ajustando el paso sobre la marcha.
+  if (hasTarget) targetZ += Math.sin(elapsedTime * 2.2 * t.speedFactor + t.weavePhase) * 0.4
+
+  steerToward(t.group.position, t.velocity, targetX, targetZ, TEAMMATE_SPEED * t.speedFactor, dt)
+  keepOutOfGoalArea(t.group.position)
+
+  if (t.velocity.lengthSq() > 0.01) {
+    t.facing.copy(t.velocity).normalize()
+    t.group.rotation.y = Math.atan2(t.facing.x, t.facing.z) + Math.PI / 2
+  }
+
+  if (t.target) {
+    const distToOrder = Math.hypot(t.target.x - t.group.position.x, t.target.z - t.group.position.z)
+    if (distToOrder < 0.3) t.marker.visible = false
+  }
+}
+
+// Movimiento con inercia tipo "seek": la velocidad persigue a la dirección
+// deseada en vez de saltar a ella de golpe, y frena al acercarse al destino
+// en vez de pararse en seco — así las trayectorias se curvan de forma
+// natural cuando el objetivo cambia, en lugar de ir en línea recta siempre.
+function steerToward(pos: THREE.Vector3, velocity: THREE.Vector3, targetX: number, targetZ: number, maxSpeed: number, dt: number) {
   const dx = targetX - pos.x
   const dz = targetZ - pos.z
   const dist = Math.hypot(dx, dz)
-  if (dist < 0.15) {
-    if (t.target) t.marker.visible = false
-    return
+
+  if (dist < 0.08) {
+    velocity.multiplyScalar(Math.max(0, 1 - dt * 6))
+  } else {
+    const brake = THREE.MathUtils.clamp(dist / 2, 0.2, 1) // frena al llegar, no se para en seco
+    const desired = new THREE.Vector3(dx / dist, 0, dz / dist).multiplyScalar(maxSpeed * brake)
+    velocity.lerp(desired, Math.min(1, dt * 5))
   }
-  const dir = new THREE.Vector3(dx / dist, 0, dz / dist)
-  pos.addScaledVector(dir, Math.min(TEAMMATE_SPEED * dt, dist))
-  keepOutOfGoalArea(pos)
-  t.facing = dir
-  t.group.rotation.y = Math.atan2(dir.x, dir.z) + Math.PI / 2
+
+  if (velocity.lengthSq() > 0.0001) {
+    const step = velocity.clone().multiplyScalar(dt)
+    if (step.length() > dist) step.setLength(dist)
+    pos.add(step)
+  }
 }
 
 function updateBallHeld() {
@@ -818,16 +875,11 @@ function updateDefenders(dt: number) {
     fromGoal.normalize().multiplyScalar(distFromGoal)
     markX = goalCenter.x + fromGoal.x
     markZ = THREE.MathUtils.clamp(goalCenter.y + fromGoal.y, -FIELD_Z_LIMIT, FIELD_Z_LIMIT)
+    markZ += Math.sin(elapsedTime * 2.2 * defender.speedFactor + defender.weavePhase) * 0.3
 
-    const pos = defender.group.position
-    const dx = markX - pos.x
-    const dz = markZ - pos.z
-    const dist = Math.hypot(dx, dz)
-    if (dist > 0.05) {
-      const step = Math.min(DEFENDER_SPEED * dt, dist)
-      pos.x += (dx / dist) * step
-      pos.z += (dz / dist) * step
-      defender.group.rotation.y = Math.atan2(dx, dz) + Math.PI / 2
+    steerToward(defender.group.position, defender.velocity, markX, markZ, DEFENDER_SPEED * defender.speedFactor, dt)
+    if (defender.velocity.lengthSq() > 0.01) {
+      defender.group.rotation.y = Math.atan2(defender.velocity.x, defender.velocity.z) + Math.PI / 2
     }
   }
 }
